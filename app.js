@@ -220,6 +220,7 @@ $('#login-form').addEventListener('submit', async e => {
         form.reset();
         error.hidden = true;
         await api('state');
+        autoSync();
     } finally {
         submit.disabled = false;
     }
@@ -271,7 +272,7 @@ function renderWeek() {
 
     const colTotals = acts.map(() => ({ done: 0, total: 0, gold: 0 }));
     stats.perChar.forEach(({ char: c, done, total, gold }) => {
-        html += `<tr><th>${charName(c)}<span class="lvl">${c.level}${c.realm ? ' · ' + esc(c.realm) : ''}</span></th>`;
+        html += `<tr><th>${charName(c)}<span class="lvl">${c.level}${c.realm ? ' · ' + esc(c.realm) : ''}${syncWarning(c)}</span></th>`;
         acts.forEach((a, i) => {
             if (!eligible(c, a)) {
                 html += '<td class="cell na">–</td>';
@@ -348,13 +349,99 @@ function listItem(type, item, inner) {
 
 function renderManage() {
     $('#char-list').innerHTML = state.characters.map(c =>
-        listItem('characters', c, `${charName(c)} <span class="muted">${c.level} ${esc(c.class)}${c.realm ? ' · ' + esc(c.realm) : ''}</span>`)
+        listItem('characters', c, `${charName(c)} <span class="muted">${c.level} ${esc(c.class)}${c.realm ? ' · ' + esc(c.realm) : ''}</span>`
+            + (c.syncError ? ` <span class="sync-error">${esc(c.syncError)}</span>` : ''))
     ).join('') || '<li class="muted">No characters yet.</li>';
+    renderSyncStatus();
 
     $('#act-list').innerHTML = state.activities.map(a =>
         listItem('activities', a, `${esc(a.name)}${reqBadge(a)}${a.gold ? ` <span class="gold-inline">~${fmtGold(a.gold)}</span>` : ''}${a.notes ? ` <span class="muted">${esc(a.notes)}</span>` : ''}`)
     ).join('') || '<li class="muted">No activities yet.</li>';
 }
+
+// ---------- Armory sync ----------
+// The server refreshes levels and classes from the Blizzard API (armory.php). The page asks for
+// that whenever the last sync is older than state.autoSyncInterval, or from the Manage button.
+
+let syncing = false;
+let lastAutoSync = 0; // ms; keeps a failing server from being retried every minute
+
+function sync() {
+    if (syncing) return Promise.resolve();
+    syncing = true;
+    renderSyncStatus();
+    return api('sync', {}).finally(() => {
+        syncing = false;
+        renderSyncStatus();
+    });
+}
+
+function autoSync() {
+    const stale = Date.now() / 1000 - (state.lastSync || 0) > state.autoSyncInterval;
+    if (state.armoryEnabled && stale && Date.now() - lastAutoSync > 10 * 60000) {
+        lastAutoSync = Date.now();
+        sync().catch(() => {});
+    }
+}
+
+function ago(timestamp) {
+    const minutes = Math.round((Date.now() / 1000 - timestamp) / 60);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)} days ago`;
+}
+
+function syncWarning(c) {
+    return c.syncError ? ` <span class="sync-warn" title="Armory sync: ${esc(c.syncError)}">⚠</span>` : '';
+}
+
+function renderSyncStatus() {
+    $('#sync').hidden = !state.armoryEnabled;
+    $('#sync-btn').disabled = syncing;
+    $('#sync-btn').textContent = syncing ? 'Syncing…' : 'Sync with Armory';
+    const status = $('#sync-status');
+    status.className = state.lastSyncError ? 'sync-error' : 'muted';
+    status.textContent = state.lastSyncError ? `Last sync failed: ${state.lastSyncError}`
+        : state.lastSync ? `Levels synced ${ago(state.lastSync)}` : 'Not synced yet';
+}
+
+$('#sync-btn').addEventListener('click', () => sync().catch(() => {}));
+
+// ---------- Import ----------
+
+$('#import-btn').addEventListener('click', () => $('#import-file').click());
+
+$('#import-file').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = ''; // so picking the same file again still fires "change"
+    if (!file) return;
+    let data;
+    try {
+        data = JSON.parse(await file.text());
+    } catch {
+        alert(`${file.name} is not a valid JSON file.`);
+        return;
+    }
+    if (!Array.isArray(data?.characters) || !Array.isArray(data?.activities)) {
+        alert(`${file.name} is not a Goldmaker data file.`);
+        return;
+    }
+    const weeks = Object.keys(data.completions || {}).length;
+    const summary = `${data.characters.length} characters, ${data.activities.length} activities, ${weeks} weeks of history`;
+    if (!confirm(`Replace ALL current data with ${file.name}?
+
+${summary}
+
+The current data is kept as a backup on the server.`)) return;
+    try {
+        await api('import', { data });
+        lastAutoSync = 0; // the import cleared lastSync; refresh levels right away
+        autoSync();
+    } catch {
+        // api() has already shown the error
+    }
+});
 
 // ---------- Forms ----------
 
@@ -485,6 +572,8 @@ setInterval(() => {
     } else if (!document.activeElement?.matches('.gold-input')) {
         renderWeek();
     }
+    renderSyncStatus();
+    autoSync();
 }, 60000);
 
-api('state');
+api('state').then(autoSync, () => {});

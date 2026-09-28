@@ -1,4 +1,11 @@
 <?php
-// Local development only: copy to config.local.php and pick a password.
-// On the server, set the GOLDMAKER_PASSWORD environment variable instead.
-return ['password' => 'change-me'];
+// Local development only: copy to config.local.php and fill in.
+// On the server, set the matching environment variables instead (GOLDMAKER_PASSWORD,
+// BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, BLIZZARD_REGION); they take precedence.
+return [
+    'password' => 'change-me',
+    // Optional: enables the Armory level sync. Get these at https://develop.battle.net/access/clients
+    'blizzard_client_id' => '',
+    'blizzard_client_secret' => '',
+    'blizzard_region' => 'eu',
+];

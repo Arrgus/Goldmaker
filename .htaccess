@@ -1,6 +1,7 @@
-# Hide dotfiles/folders (.git, .idea, .htaccess) and project files that aren't part of the site.
+# Hide dotfiles/folders (.git, .idea, .htaccess), project files that aren't part of the site,
+# and PHP files that are only meant to be included by api.php.
 RedirectMatch 404 "/\."
-<FilesMatch "^(CLAUDE\.md|config\.local\.php.*|Dockerfile)$">
+<FilesMatch "^(CLAUDE\.md|config\.local\.php.*|Dockerfile|armory\.php)$">
     Require all denied
 </FilesMatch>
 

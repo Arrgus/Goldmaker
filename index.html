@@ -46,6 +46,10 @@
         <div class="manage">
             <div class="panel">
                 <h2>Characters</h2>
+                <div id="sync" class="sync" hidden>
+                    <button type="button" id="sync-btn">Sync with Armory</button>
+                    <span id="sync-status" class="muted"></span>
+                </div>
                 <form id="char-form">
                     <input type="hidden" name="id">
                     <input name="name" placeholder="Name" required>
@@ -73,6 +77,13 @@
                     <button type="button" class="cancel link" hidden>Cancel</button>
                 </form>
                 <ul id="act-list" class="list"></ul>
+            </div>
+            <div class="panel">
+                <h2>Data</h2>
+                <p class="muted">Replace all characters, activities and history with a <b>goldmaker.json</b> file.
+                    The current data is kept as a backup file on the server.</p>
+                <button type="button" id="import-btn">Import goldmaker.json…</button>
+                <input type="file" id="import-file" accept=".json,application/json" hidden>
             </div>
         </div>
     </section>

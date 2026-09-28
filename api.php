@@ -11,6 +11,11 @@ const SESSION_TTL = 30 * 86400;
 const MAX_LOGIN_FAILURES = 10;
 const FAILURE_WINDOW = 15 * 60;
 
+const MAX_LEVEL = 90;
+const AUTO_SYNC_INTERVAL = 6 * 3600; // app.js syncs on its own once lastSync is older than this
+
+require __DIR__ . '/armory.php';
+
 header('Content-Type: application/json');
 header('Cache-Control: no-store');
 
@@ -47,6 +52,110 @@ function isWeekKey(mixed $week): bool
     return is_string($week) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $week) === 1;
 }
 
+function clampLevel(mixed $level, int $default): int
+{
+    return max(1, min(MAX_LEVEL, is_numeric($level) ? (int) $level : $default));
+}
+
+function text(mixed $value): string
+{
+    return is_scalar($value) ? trim((string) $value) : '';
+}
+
+// Field rules shared by the edit forms and the import.
+function characterFields(array $in): array
+{
+    $name = text($in['name'] ?? '');
+    if ($name === '') {
+        fail('Character name is required');
+    }
+    return [
+        'name' => $name,
+        'realm' => text($in['realm'] ?? ''),
+        'class' => text($in['class'] ?? ''),
+        'level' => clampLevel($in['level'] ?? null, 80),
+    ];
+}
+
+function activityFields(array $in): array
+{
+    $name = text($in['name'] ?? '');
+    if ($name === '') {
+        fail('Activity name is required');
+    }
+    return [
+        'name' => $name,
+        'minLevel' => clampLevel($in['minLevel'] ?? null, 80),
+        'notes' => text($in['notes'] ?? ''),
+        'gold' => max(0, (int) text($in['gold'] ?? 0)),
+    ];
+}
+
+// Completions are stored as week => charId => [actId => gold]. Older data used a plain
+// list of actIds; convert those with null gold, meaning "use the activity's default".
+function normalizeCompletions(mixed $completions): array
+{
+    $result = [];
+    foreach ((array) $completions as $week => $chars) {
+        if (!isWeekKey($week)) {
+            fail("Bad week \"$week\" in completions");
+        }
+        foreach ((array) $chars as $charId => $entries) {
+            $entries = (array) $entries;
+            if (array_is_list($entries)) {
+                $entries = array_fill_keys(array_filter($entries, 'is_string'), null);
+            }
+            foreach ($entries as $actId => $gold) {
+                $result[$week][$charId][$actId] = is_numeric($gold) ? max(0, (int) $gold) : null;
+            }
+        }
+    }
+    return $result;
+}
+
+// Imported ids must look like ours: they end up in HTML attributes unescaped.
+function importItems(mixed $items, string $prefix, callable $fields): array
+{
+    if (!is_array($items) || !array_is_list($items)) {
+        fail('Not a Goldmaker data file');
+    }
+    $result = [];
+    foreach ($items as $item) {
+        $id = is_array($item) ? ($item['id'] ?? null) : null;
+        if (!is_string($id) || !preg_match("/^{$prefix}[0-9a-f]+\\z/", $id) || in_array($id, array_column($result, 'id'), true)) {
+            fail('Invalid or duplicate id in the imported file');
+        }
+        $result[] = ['id' => $id] + $fields($item);
+    }
+    return $result;
+}
+
+// Settings come from environment variables on the server, or from config.local.php locally.
+function config(string $env, string $localKey): string
+{
+    static $local = null;
+    $value = getenv($env);
+    if ($value === false || $value === '') {
+        $local ??= is_file(__DIR__ . '/config.local.php') ? (array) require __DIR__ . '/config.local.php' : [];
+        $value = $local[$localKey] ?? '';
+    }
+    return is_string($value) ? $value : '';
+}
+
+// Reads the saved data under a shared lock, for work that must happen before taking the
+// exclusive lock (see the "sync" action).
+function readStateSnapshot(): array
+{
+    $fh = @fopen(DATA_FILE, 'r');
+    if (!$fh) {
+        return [];
+    }
+    flock($fh, LOCK_SH);
+    $state = json_decode(stream_get_contents($fh) ?: '', true);
+    fclose($fh);
+    return is_array($state) ? $state : [];
+}
+
 // ---------- Auth ----------
 // A single shared password from the environment (or config.local.php for local dev).
 // The session cookie is "expiry.hmac", keyed by the password, so it survives restarts
@@ -54,11 +163,8 @@ function isWeekKey(mixed $week): bool
 
 function password(): string
 {
-    $pw = getenv('GOLDMAKER_PASSWORD');
-    if (($pw === false || $pw === '') && is_file(__DIR__ . '/config.local.php')) {
-        $pw = (require __DIR__ . '/config.local.php')['password'] ?? '';
-    }
-    if (!is_string($pw) || $pw === '') {
+    $pw = config('GOLDMAKER_PASSWORD', 'password');
+    if ($pw === '') {
         fail('Login is not configured: set GOLDMAKER_PASSWORD', 503);
     }
     return $pw;
@@ -165,6 +271,21 @@ if ($expires - time() < SESSION_TTL / 2) {
     signIn(); // sliding expiry: regular use keeps you signed in
 }
 
+// Armory lookups can take seconds, so they run before the exclusive lock is taken; the
+// results are applied by character id below, skipping anyone deleted in the meantime.
+$armory = [];
+$armoryError = null;
+if ($action === 'sync') {
+    if (!armoryConfigured()) {
+        fail('Armory sync is not configured: set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET');
+    }
+    try {
+        $armory = fetchArmoryCharacters(readStateSnapshot()['characters'] ?? []);
+    } catch (RuntimeException $e) {
+        $armoryError = $e->getMessage();
+    }
+}
+
 $fh = fopen(DATA_FILE, 'c+');
 flock($fh, LOCK_EX);
 $raw = stream_get_contents($fh);
@@ -172,33 +293,14 @@ $state = $raw ? json_decode($raw, true) : null;
 if (!is_array($state)) {
     $state = emptyState();
 }
-$state['completions'] = (array) ($state['completions'] ?? []);
-
-// Completions are stored as week => charId => [actId => gold]. Older data used a plain
-// list of actIds; convert those with null gold, meaning "use the activity's default".
-foreach ($state['completions'] as $week => $chars) {
-    foreach ((array) $chars as $charId => $entries) {
-        if (array_is_list($entries)) {
-            $state['completions'][$week][$charId] = array_fill_keys($entries, null);
-        }
-    }
-}
+$state['completions'] = normalizeCompletions($state['completions'] ?? []);
 
 switch ($action) {
     case 'state':
         break;
 
     case 'saveCharacter':
-        $name = trim((string) ($in['name'] ?? ''));
-        if ($name === '') {
-            fail('Name is required');
-        }
-        $char = [
-            'name' => $name,
-            'realm' => trim((string) ($in['realm'] ?? '')),
-            'class' => (string) ($in['class'] ?? ''),
-            'level' => max(1, min(90, (int) ($in['level'] ?? 80))),
-        ];
+        $char = characterFields($in);
         if (!empty($in['id'])) {
             $i = findIndex($state['characters'], $in['id']);
             $state['characters'][$i] = ['id' => $in['id']] + $char;
@@ -208,16 +310,7 @@ switch ($action) {
         break;
 
     case 'saveActivity':
-        $name = trim((string) ($in['name'] ?? ''));
-        if ($name === '') {
-            fail('Name is required');
-        }
-        $act = [
-            'name' => $name,
-            'minLevel' => max(1, min(90, (int) ($in['minLevel'] ?? 80))),
-            'notes' => trim((string) ($in['notes'] ?? '')),
-            'gold' => max(0, (int) ($in['gold'] ?? 0)),
-        ];
+        $act = activityFields($in);
         if (!empty($in['id'])) {
             $i = findIndex($state['activities'], $in['id']);
             $state['activities'][$i] = ['id' => $in['id']] + $act;
@@ -278,6 +371,46 @@ switch ($action) {
         }
         break;
 
+    case 'import':
+        // Replaces everything with an uploaded goldmaker.json. The old file is kept as a backup
+        // next to it; lastSync is dropped so the page re-syncs levels from the armory.
+        $data = $in['data'] ?? null;
+        if (!is_array($data)) {
+            fail('Not a Goldmaker data file');
+        }
+        $imported = [
+            'characters' => importItems($data['characters'] ?? null, 'c', 'characterFields'),
+            'activities' => importItems($data['activities'] ?? null, 'a', 'activityFields'),
+            'completions' => normalizeCompletions($data['completions'] ?? []),
+        ];
+        if ($raw) {
+            file_put_contents(DATA_DIR . '/backup-' . date('Y-m-d-His') . '.json', $raw);
+        }
+        $state = $imported;
+        break;
+
+    case 'sync':
+        foreach ($state['characters'] as &$char) {
+            $result = $armory[$char['id']] ?? null;
+            if ($result === null) {
+                continue; // added while the lookup ran, or the whole sync failed
+            }
+            unset($char['syncError']);
+            if (isset($result['error'])) {
+                $char['syncError'] = $result['error'];
+                continue;
+            }
+            $char['level'] = clampLevel($result['level'], $char['level']);
+            if ($result['class'] !== '') {
+                $char['class'] = $result['class'];
+            }
+        }
+        unset($char);
+        // Set even when the sync failed, so a broken setup isn't retried on every page load.
+        $state['lastSync'] = time();
+        $state['lastSyncError'] = $armoryError;
+        break;
+
     default:
         fail('Unknown action');
 }
@@ -292,4 +425,6 @@ flock($fh, LOCK_UN);
 fclose($fh);
 
 $state['completions'] = (object) $state['completions'];
+$state['armoryEnabled'] = armoryConfigured();
+$state['autoSyncInterval'] = AUTO_SYNC_INTERVAL;
 echo json_encode($state);
