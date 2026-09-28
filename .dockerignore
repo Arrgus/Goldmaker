@@ -7,3 +7,4 @@ config.local.php
 config.local.php.example
 CLAUDE.md
 Dockerfile
+tests

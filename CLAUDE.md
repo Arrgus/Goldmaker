@@ -4,30 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Goldmaker is a personal tracker for World of Warcraft weekly gold-making activities, used across many alts. The grid has one row per character and one column per activity. Each cell records whether that character did that activity this week, and how much gold it paid. It's a single-user app: plain PHP, vanilla JS and one JSON file, with no framework, build step, dependencies or tests.
+Goldmaker is a personal tracker for World of Warcraft weekly gold-making activities, used across many alts. The grid has one row per character and one column per activity. Each cell records whether that character did that activity this week, and how much gold it paid. It's a single-user app: plain PHP, vanilla JS and one JSON file, with no framework, build step or dependencies.
 
-## Running and checking
+## Where it runs and how to change it
 
-- The project lives in the local Apache docroot (`D:\htdocs`), so it's served from there. `php -S localhost:8000` from the project root also works.
+- **Live:** the app only runs on the Dokploy server (see Deployment). The real data is `/data/goldmaker.json` in the server's persistent volume.
+- **The local copy is retired (since 2026-09-29).** It used to run under the local Apache (`D:\htdocs`). The `data/` folder and `config.local.php` here are stale leftovers: don't treat them as the real data, and never copy them over the server's. `config()` still falls back to `config.local.php` when an env var is empty.
+- **Making a change:** edit here, run the checks below, commit, then push `main` to GitHub (`origin`) and deploy it from Dokploy.
+- **Checks:**
+  - `php tests/api.test.php` runs end-to-end tests of `api.php`. It starts `php -S` from a temp copy of the site with a fresh data folder, so it never touches real data, `config.local.php` or Battle.net. Needs PHP 8.1+ with curl.
+  - `node tests/client.test.js` runs `app.js` against a stub DOM and a simulated server. It checks the request queue, the sync, logging out and error handling. Needs Node 18+.
+  - Syntax only: `php -l api.php` and `node --check app.js`. There's no linter or bundler.
+  - **Not covered:** the real armory sync, Apache (the `.htaccess` rules and headers) and real browser behaviour (form validation, `<select>` values, layout). Check those by hand, for example with the Docker command under Deployment.
+- **Running it locally:**
+  - Docker is closest to the server.
+  - `php -S` also works, but it ignores `.htaccess`, so the data-folder block and the security headers don't apply.
+  - The armory sync fails locally with an SSL error, because the local Windows PHP has no CA bundle configured (`curl.cainfo`). The Docker image is fine.
 - Needs PHP 8.1+ (`never` return type, `array_is_list`).
-- The app requires a login. For local use, copy `config.local.php.example` to `config.local.php` (gitignored). On a server, set the `GOLDMAKER_PASSWORD` env var instead. `GOLDMAKER_DATA_DIR` moves the data folder, e.g. outside the web root in Docker.
-- The armory sync needs curl to trust HTTPS certificates. The local Windows PHP has no CA bundle configured (`curl.cainfo`), so syncing fails locally with an SSL error; the Docker image is fine.
-- `php -S` ignores `.htaccess`, so the data-folder block and the security headers only apply under Apache.
-- Syntax check: `php -l api.php`. There is no linter, test suite or bundler.
-- `data/goldmaker.json` holds the real data. Don't reset it, reformat it by hand or commit test data into it.
 
 ## Deployment (Dokploy)
 
 - **Image:** the `Dockerfile` builds on `php:8.3-apache`, so there's no compose file. It turns on `.htaccess` support and the headers module, and loads `docker/apache.conf` as `zz-…` so it overrides Debian's `security.conf`.
-- **Files served:** only the files listed in the `COPY` line go into the web root. **A new site file must be added to that line.**
+- **Files served:** only the files listed in the `COPY` line go into the web root. **A new site file must be added to that line.** `tests/` isn't deployed.
 - **Data:** `GOLDMAKER_DATA_DIR=/data` sits outside the web root. `/data` must be a persistent volume, and the entrypoint `chown`s it to `www-data` at startup.
+  - Besides `goldmaker.json`, it holds `goldmaker.lock`, `login-failures.json` and the armory caches (`blizzard-token.json`, `realm-index.json`).
+  - It also holds `backup-<timestamp>.json` files from imports. These are the only backups the app makes itself.
+  - `goldmaker.json.tmp` only exists for a moment during a save.
+- **If the app reports a damaged data file,** nothing has been changed. Replace `/data/goldmaker.json` with a good copy: a `backup-*.json`, or a backup of the volume.
 - **Env vars on the server:** `GOLDMAKER_PASSWORD`, plus `BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET` and `BLIZZARD_REGION` (default `eu`) for the armory sync. `config()` in `api.php` reads each env var first, then the matching key in `config.local.php`.
 - **HTTPS:** Traefik terminates TLS. `api.php` trusts `X-Forwarded-Proto` to decide whether the cookie gets the `Secure` flag.
 - **Local test:** `docker build -t goldmaker . && docker run -p 8080:80 -e GOLDMAKER_PASSWORD=… -v <dir>:/data goldmaker`
 
 ## Architecture
 
-**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`).
+**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `import`, `sync`).
 - **Auth runs before the data file is opened.**
   - There is a single shared password. The `goldmaker_session` cookie holds `expiry.hmac`, keyed by that password, so there is no server-side session storage and changing the password signs everyone out. The cookie is renewed once it's more than halfway to expiry.
   - Every action except `state` must be a POST with a JSON content type (the CSRF defence, together with the SameSite=Lax cookie).
@@ -69,7 +79,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
   - Logout signs the page out at once but sends its request only after everything already underway, including a running sync, so no reply can renew the cookie afterwards. `signOuts` makes the page ignore replies to requests made before the logout.
 - `requestRender()` waits for `pointerup` (or `pointercancel`, which ends a touch that became a scroll) before re-rendering. Otherwise re-rendering between mousedown and mouseup swallows clicks, for example when leaving a gold input by clicking another cell.
 
-## Data model (`data/goldmaker.json`)
+## Data model (`goldmaker.json` in `DATA_DIR`)
 
 ```
 characters: [{id, name, realm, class, level, syncError?}]  // order = display order ("move" swaps neighbours)
@@ -92,3 +102,23 @@ lastSync?: unix time, lastSyncError?: string|null
 - **Class colors:** the `CLASSES` map in `app.js` supplies the class colors and also fills the class `<select>`.
 - **Gold input** (`parseGold`) accepts `1900`, `1,900`, `1.9k` and `20k`. A number with one or two digits before the decimal point is read as thousands (`19` means 19k). An empty input means "use the default".
 - **Activity gold field:** it keeps `step="100"` so the arrows move by 100. Instead of letting the browser refuse a value like 1250, its `invalid` handler rounds the value down and submits again. Negative values are left for the browser's own warning.
+
+## Open issues (from the September 2026 audit)
+
+The audit's data-loss and robustness bugs are fixed and covered by `tests/`. These items are still open.
+
+**Security:**
+- **The session cookie is signed with the password itself** (`sessionSignature`).
+  - A leaked cookie lets someone test password guesses offline, which gets around the login limit.
+  - Logging out only clears your own copy of the cookie, so a stolen copy stays valid; only changing the password signs it out.
+  - **Fix:** mix a random secret, stored in `DATA_DIR`, into the key. Deleting that file then signs out every session.
+- **No HSTS header.**
+  - First make sure the Dokploy domain has HTTPS with redirect switched on.
+  - Then add `Header always set Strict-Transport-Security "max-age=31536000" "expr=%{HTTP:X-Forwarded-Proto} == 'https'"` to `.htaccess`.
+- **The Dockerfile copies the site with `--chown=www-data`,** so Apache could overwrite its own code and `.htaccess`. Nothing needs that; drop `--chown`.
+- **Accepted by design:** anyone can block new logins by sending 10 wrong passwords every 15 minutes. Existing sessions keep working.
+
+**Bugs:**
+- **Import backups:** they're named to the second, so two imports within the same second overwrite the first backup. Backups are never pruned.
+- **Realm-index cache:** it isn't tied to a region. After changing `BLIZZARD_REGION`, the old list is used for up to 7 days; delete `realm-index.json` to refresh it.
+- **Double-clicking Add** in the Manage forms submits twice and creates two entries.
