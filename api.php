@@ -4,6 +4,9 @@ declare(strict_types=1);
 // In Docker the data lives outside the web root; locally it defaults to ./data (blocked by data/.htaccess).
 define('DATA_DIR', getenv('GOLDMAKER_DATA_DIR') ?: __DIR__ . '/data');
 const DATA_FILE = DATA_DIR . '/goldmaker.json';
+// Reads and writes of DATA_FILE are locked through this file, not DATA_FILE itself, because
+// saving replaces DATA_FILE with a new file (see saveState).
+const LOCK_FILE = DATA_DIR . '/goldmaker.lock';
 const FAILURES_FILE = DATA_DIR . '/login-failures.json';
 
 const SESSION_COOKIE = 'goldmaker_session';
@@ -37,7 +40,8 @@ function newId(string $prefix): string
     return $prefix . bin2hex(random_bytes(5));
 }
 
-function findIndex(array $items, string $id): int
+// $id comes straight from the request, so it may not even be a string; that is just "not found".
+function findIndex(array $items, mixed $id): int
 {
     foreach ($items as $i => $item) {
         if ($item['id'] === $id) {
@@ -47,14 +51,38 @@ function findIndex(array $items, string $id): int
     fail('Not found', 404);
 }
 
+// Ids are a type prefix plus random hex (see newId). app.js puts them into HTML attributes
+// unescaped, and PHP would turn numeric ids into integer array keys.
+function isId(mixed $id, string $prefix): bool
+{
+    return is_string($id) && preg_match("/^{$prefix}[0-9a-f]+\\z/", $id) === 1;
+}
+
+// A week key is the date of the Wednesday the week starts on (weekStart in app.js). The history
+// view walks back week by week to the oldest key, so years are limited to WoW's lifetime:
+// a key like 0050-01-01 would make that loop run for ever.
 function isWeekKey(mixed $week): bool
 {
-    return is_string($week) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $week) === 1;
+    if (!is_string($week)) {
+        return false;
+    }
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $week);
+    $year = $date ? (int) $date->format('Y') : 0;
+    return $date && $date->format('Y-m-d') === $week // also rejects overflow like 2026-99-99
+        && $date->format('N') === '3'
+        && $year >= 2004 && $year <= (int) date('Y') + 1;
 }
 
 function clampLevel(mixed $level, int $default): int
 {
     return max(1, min(MAX_LEVEL, is_numeric($level) ? (int) $level : $default));
+}
+
+// Gold is only kept to the hundred: the amounts are rough guides, so the rest is dropped
+// (1250 -> 1200, 99 -> 0).
+function goldAmount(mixed $gold): int
+{
+    return intdiv(max(0, (int) $gold), 100) * 100;
 }
 
 function text(mixed $value): string
@@ -87,7 +115,7 @@ function activityFields(array $in): array
         'name' => $name,
         'minLevel' => clampLevel($in['minLevel'] ?? null, 80),
         'notes' => text($in['notes'] ?? ''),
-        'gold' => max(0, (int) text($in['gold'] ?? 0)),
+        'gold' => goldAmount(text($in['gold'] ?? 0)),
     ];
 }
 
@@ -101,11 +129,17 @@ function normalizeCompletions(mixed $completions): array
             fail("Bad week \"$week\" in completions");
         }
         foreach ((array) $chars as $charId => $entries) {
+            if (!isId($charId, 'c')) {
+                fail("Bad character id \"$charId\" in completions");
+            }
             $entries = (array) $entries;
             if (array_is_list($entries)) {
                 $entries = array_fill_keys(array_filter($entries, 'is_string'), null);
             }
             foreach ($entries as $actId => $gold) {
+                if (!isId($actId, 'a')) {
+                    fail("Bad activity id \"$actId\" in completions");
+                }
                 $result[$week][$charId][$actId] = is_numeric($gold) ? max(0, (int) $gold) : null;
             }
         }
@@ -113,7 +147,6 @@ function normalizeCompletions(mixed $completions): array
     return $result;
 }
 
-// Imported ids must look like ours: they end up in HTML attributes unescaped.
 function importItems(mixed $items, string $prefix, callable $fields): array
 {
     if (!is_array($items) || !array_is_list($items)) {
@@ -122,7 +155,7 @@ function importItems(mixed $items, string $prefix, callable $fields): array
     $result = [];
     foreach ($items as $item) {
         $id = is_array($item) ? ($item['id'] ?? null) : null;
-        if (!is_string($id) || !preg_match("/^{$prefix}[0-9a-f]+\\z/", $id) || in_array($id, array_column($result, 'id'), true)) {
+        if (!isId($id, $prefix) || in_array($id, array_column($result, 'id'), true)) {
             fail('Invalid or duplicate id in the imported file');
         }
         $result[] = ['id' => $id] + $fields($item);
@@ -146,14 +179,49 @@ function config(string $env, string $localKey): string
 // exclusive lock (see the "sync" action).
 function readStateSnapshot(): array
 {
-    $fh = @fopen(DATA_FILE, 'r');
-    if (!$fh) {
-        return [];
-    }
-    flock($fh, LOCK_SH);
-    $state = json_decode(stream_get_contents($fh) ?: '', true);
-    fclose($fh);
+    $lock = fopen(LOCK_FILE, 'c');
+    flock($lock, LOCK_SH);
+    $state = json_decode(@file_get_contents(DATA_FILE) ?: '', true);
+    fclose($lock);
     return is_array($state) ? $state : [];
+}
+
+// A data file that exists but doesn't parse is an error, never an empty state: the next save
+// would overwrite it and everything in it would be lost.
+function loadState(): array
+{
+    $raw = is_file(DATA_FILE) ? file_get_contents(DATA_FILE) : '';
+    if ($raw === false) {
+        fail('Could not read the data file', 500);
+    }
+    $state = $raw === '' ? emptyState() : json_decode($raw, true);
+    if (!is_array($state)) {
+        fail('The data file is damaged (' . json_last_error_msg() . '). Nothing was changed; restore goldmaker.json from a backup.', 500);
+    }
+    $state += emptyState();
+    $state['completions'] = normalizeCompletions($state['completions']);
+    return $state;
+}
+
+// Writes a temp file and renames it over the data file, so a crash or a full disk mid-write
+// leaves the previous version in place instead of a truncated file.
+function saveState(array $state): void
+{
+    try {
+        $json = json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+    } catch (JsonException $e) {
+        fail('Could not save the data: ' . $e->getMessage(), 500);
+    }
+    $tmp = DATA_FILE . '.tmp';
+    $fh = @fopen($tmp, 'w');
+    $written = $fh && fwrite($fh, $json) === strlen($json) && fflush($fh) && fsync($fh);
+    if ($fh) {
+        fclose($fh);
+    }
+    if (!$written || !@rename($tmp, DATA_FILE)) {
+        @unlink($tmp);
+        fail('Could not save the data file. Nothing was changed.', 500);
+    }
 }
 
 // ---------- Auth ----------
@@ -286,14 +354,9 @@ if ($action === 'sync') {
     }
 }
 
-$fh = fopen(DATA_FILE, 'c+');
-flock($fh, LOCK_EX);
-$raw = stream_get_contents($fh);
-$state = $raw ? json_decode($raw, true) : null;
-if (!is_array($state)) {
-    $state = emptyState();
-}
-$state['completions'] = normalizeCompletions($state['completions'] ?? []);
+$lock = fopen(LOCK_FILE, 'c');
+flock($lock, LOCK_EX);
+$state = loadState();
 
 switch ($action) {
     case 'state':
@@ -324,7 +387,7 @@ switch ($action) {
         if (!in_array($type, ['characters', 'activities'], true)) {
             fail('Bad type');
         }
-        $i = findIndex($state[$type], (string) ($in['id'] ?? ''));
+        $i = findIndex($state[$type], $in['id'] ?? null);
         array_splice($state[$type], $i, 1);
         // Completion history is kept on purpose; entries for deleted ids are simply ignored.
         break;
@@ -334,7 +397,7 @@ switch ($action) {
         if (!in_array($type, ['characters', 'activities'], true)) {
             fail('Bad type');
         }
-        $i = findIndex($state[$type], (string) ($in['id'] ?? ''));
+        $i = findIndex($state[$type], $in['id'] ?? null);
         $j = $i + (($in['dir'] ?? 0) < 0 ? -1 : 1);
         if ($j >= 0 && $j < count($state[$type])) {
             [$state[$type][$i], $state[$type][$j]] = [$state[$type][$j], $state[$type][$i]];
@@ -343,16 +406,16 @@ switch ($action) {
 
     case 'toggle':
         $week = $in['week'] ?? null;
-        $charId = (string) ($in['charId'] ?? '');
-        $actId = (string) ($in['actId'] ?? '');
-        if (!isWeekKey($week) || $charId === '' || $actId === '') {
+        $charId = $in['charId'] ?? null;
+        $actId = $in['actId'] ?? null;
+        if (!isWeekKey($week) || !isId($charId, 'c') || !isId($actId, 'a')) {
             fail('Bad toggle');
         }
         $entries = $state['completions'][$week][$charId] ?? [];
         if (!empty($in['done'])) {
             // Snapshot the gold so later changes to the activity's default don't rewrite history.
             if (is_numeric($in['gold'] ?? null)) {
-                $gold = max(0, (int) $in['gold']);
+                $gold = goldAmount($in['gold']);
             } else {
                 $act = $state['activities'][findIndex($state['activities'], $actId)];
                 $gold = (int) ($act['gold'] ?? 0);
@@ -383,8 +446,8 @@ switch ($action) {
             'activities' => importItems($data['activities'] ?? null, 'a', 'activityFields'),
             'completions' => normalizeCompletions($data['completions'] ?? []),
         ];
-        if ($raw) {
-            file_put_contents(DATA_DIR . '/backup-' . date('Y-m-d-His') . '.json', $raw);
+        if (is_file(DATA_FILE) && !@copy(DATA_FILE, DATA_DIR . '/backup-' . date('Y-m-d-His') . '.json')) {
+            fail('Could not back up the current data, so nothing was imported', 500);
         }
         $state = $imported;
         break;
@@ -416,13 +479,10 @@ switch ($action) {
 }
 
 if ($action !== 'state') {
-    ftruncate($fh, 0);
-    rewind($fh);
-    fwrite($fh, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-    fflush($fh);
+    saveState($state);
 }
-flock($fh, LOCK_UN);
-fclose($fh);
+flock($lock, LOCK_UN);
+fclose($lock);
 
 $state['completions'] = (object) $state['completions'];
 $state['armoryEnabled'] = armoryConfigured();

@@ -33,10 +33,13 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
   - Every action except `state` must be a POST with a JSON content type (the CSRF defence, together with the SameSite=Lax cookie).
   - Failed logins are counted globally in `DATA_DIR/login-failures.json` (10 per 15 minutes, then 429).
 - It reads JSON from the request body.
-- Every request opens the data file with an exclusive `flock` for its whole duration, then loads, mutates and rewrites the full file. Actions other than `state` write the file back.
+- **Loading and saving:**
+  - Every request holds an exclusive `flock` on `DATA_DIR/goldmaker.lock` for its whole duration, then loads the data file (`loadState`) and mutates it. Actions other than `state` save it back.
+  - `saveState` writes a `.tmp` file and renames it over the data file, so a crash or full disk never leaves a half-written file. The lock lives in its own file because that rename replaces the data file.
+  - A data file that exists but doesn't parse is a 500 error, never treated as empty, because the next save would overwrite it. An empty or missing file is a fresh start.
 - **Every action returns the complete new state.** The front end never patches its state locally. It replaces `state` with whatever the API returns and re-renders everything.
 - Errors go through `fail()`, which returns `{error}` with an HTTP status code.
-- IDs are prefixed random hex (`c…` for characters, `a…` for activities), so PHP never turns them into integer array keys. Keep the prefixes.
+- IDs are prefixed random hex (`c…` for characters, `a…` for activities), so PHP never turns them into integer array keys. Keep the prefixes. `isId()` enforces the format wherever ids come from outside: `toggle`, the import, and the completion keys checked on every load.
 
 **Armory sync** (`armory.php`, included by `api.php`; blocked from direct web access):
 - **Trigger:** the `sync` action looks up every character on the Blizzard Profile API and overwrites `level` and `class`. `app.js` calls it from the Manage button, and on its own when `lastSync` is older than `AUTO_SYNC_INTERVAL` (6h).
@@ -56,9 +59,15 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 **Apache hardening** (`.htaccess`, `data/.htaccess`): denies access to `data/`, dotfiles, `CLAUDE.md` and the config files, and sets the CSP and other security headers. The CSP allows inline *styles*, which the class colours and history bars need, but no inline scripts.
 
 **`app.js`** holds all client logic: rendering, forms and events. Views are rebuilt as HTML strings; `esc()` must wrap all user text. Events are delegated from `#grid`, `#history` and `#view-manage`.
-- A 401 from any API call makes `setSignedIn(false)` swap to the login form and clear the in-memory data. `send()` is the raw fetch helper; `api()` also swaps in the returned state.
-- `api()` sends requests one at a time through a promise queue, so responses can't arrive out of order.
-- `requestRender()` waits for `pointerup` before re-rendering. Otherwise re-rendering between mousedown and mouseup swallows clicks, for example when leaving a gold input by clicking another cell.
+- **Requests:**
+  - `send()` is the raw fetch helper. It turns network failures and replies that aren't JSON into ordinary `{error}` replies.
+  - `check()` handles an error reply: a 401 makes `setSignedIn(false)` swap to the login form and clear the in-memory data, and any other error is shown in an alert.
+  - `api()` also swaps in the returned state.
+- **Request queue:**
+  - `api()` sends requests one at a time through `enqueue()`, so responses can't arrive out of order. Login and logout go through the queue too.
+  - The armory sync is the exception: it bypasses the queue so clicks don't wait for Battle.net, then fetches `state` through the queue instead of using its own reply, which may be older.
+  - Logout signs the page out at once but sends its request only after everything already underway, including a running sync, so no reply can renew the cookie afterwards. `signOuts` makes the page ignore replies to requests made before the logout.
+- `requestRender()` waits for `pointerup` (or `pointercancel`, which ends a touch that became a scroll) before re-rendering. Otherwise re-rendering between mousedown and mouseup swallows clicks, for example when leaving a gold input by clicking another cell.
 
 ## Data model (`data/goldmaker.json`)
 
@@ -69,8 +78,10 @@ completions: { "<weekKey>": { "<charId>": { "<actId>": gold|null } } }
 lastSync?: unix time, lastSyncError?: string|null
 ```
 
-- **Week keys** are the `YYYY-MM-DD` date of the Wednesday the week starts on. The weekly reset is Wednesday 04:00 in the *browser's* local time and is computed only in `app.js` (`weekStart`/`currentWeekKey`); the server just checks the key format.
+- **Week keys** are the `YYYY-MM-DD` date of the Wednesday the week starts on. The weekly reset is Wednesday 04:00 in the *browser's* local time and is computed only in `app.js` (`weekStart`/`currentWeekKey`). The server's `isWeekKey` only accepts a real Wednesday from 2004 to next year, and `renderHistory` skips anything older: it walks back week by week to the oldest key, and a year like `0050` made that loop endless.
+- **Bad stored data fails loudly:** the stored completions are validated on every load, so a bad week key or id there makes every request fail with an error instead of being dropped silently.
 - **Completion gold is a snapshot** taken when the cell is ticked, so changing an activity's default later doesn't rewrite history. `null` means "use the activity's current default". Older data stored a plain list of activity IDs; `api.php` migrates those to `null` on every load.
+- **Gold is kept in whole hundreds.** The amounts are rough guides, so when an activity's default or a cell's gold is saved, `goldAmount()` in `api.php` drops the rest (1,250 → 1,200, 99 → 0). Values stored before this rule are left as they are.
 - **Eligibility:** a character can do an activity if `char.level >= act.minLevel`. Levels are clamped to 1–`MAX_LEVEL` (90, the current cap) in `api.php`, and armory levels are clamped too. When the cap rises, update `MAX_LEVEL`, the `max` attributes in `index.html` and the activity level options.
 - **Deleting** a character or activity keeps its completion history; entries with unknown IDs are ignored when rendering.
 - **History totals** are recomputed from the *current* characters, levels and activities, not from what existed in that week.
@@ -80,3 +91,4 @@ lastSync?: unix time, lastSyncError?: string|null
 
 - **Class colors:** the `CLASSES` map in `app.js` supplies the class colors and also fills the class `<select>`.
 - **Gold input** (`parseGold`) accepts `1900`, `1,900`, `1.9k` and `20k`. A number with one or two digits before the decimal point is read as thousands (`19` means 19k). An empty input means "use the default".
+- **Activity gold field:** it keeps `step="100"` so the arrows move by 100. Instead of letting the browser refuse a value like 1250, its `invalid` handler rounds the value down and submits again. Negative values are left for the browser's own warning.

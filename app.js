@@ -64,34 +64,53 @@ function weekLabel(key) {
 // Requests run one at a time so responses can't arrive out of order and show stale state.
 let apiQueue = Promise.resolve();
 
-// The API only accepts changes as JSON POSTs (see api.php), so anything with a body is sent that way.
-async function send(action, body) {
-    const res = await fetch(`api.php?action=${action}`, {
-        method: body ? 'POST' : 'GET',
-        headers: { 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
-    });
-    return { res, data: await res.json() };
-}
-
-function api(action, body) {
-    const run = async () => {
-        const { res, data } = await send(action, body);
-        if (res.status === 401) {
-            setSignedIn(false);
-            throw new Error(data.error);
-        }
-        if (!res.ok) {
-            alert(data.error || 'Something went wrong');
-            throw new Error(data.error);
-        }
-        state = data;
-        setSignedIn(true);
-        requestRender();
-    };
+function enqueue(run) {
     const result = apiQueue.then(run);
     apiQueue = result.catch(() => {});
     return result;
+}
+
+// Bumped on logout. Replies to requests made before it are dropped instead of showing the data again.
+let signOuts = 0;
+
+// The API only accepts changes as JSON POSTs (see api.php), so anything with a body is sent that way.
+// A network failure or a reply that isn't JSON (a PHP fatal error, the proxy's error page during
+// a redeploy) comes back as an ordinary error.
+async function send(action, body) {
+    try {
+        const res = await fetch(`api.php?action=${action}`, {
+            method: body ? 'POST' : 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        const data = await res.json().catch(() => ({ error: `Server error (HTTP ${res.status})` }));
+        return { status: res.status, ok: res.ok && !data.error, data };
+    } catch {
+        return { status: 0, ok: false, data: { error: 'Could not reach the server' } };
+    }
+}
+
+// Throws on an error reply, after swapping to the login form (401) or showing the error.
+function check({ status, ok, data }) {
+    if (ok) return;
+    if (status === 401) {
+        setSignedIn(false);
+    } else {
+        alert(data.error || 'Something went wrong');
+    }
+    throw new Error(data.error);
+}
+
+function api(action, body) {
+    const signOutsBefore = signOuts;
+    return enqueue(async () => {
+        const reply = await send(action, body);
+        if (signOuts !== signOutsBefore) return;
+        check(reply);
+        state = reply.data;
+        setSignedIn(true);
+        requestRender();
+    });
 }
 
 // Re-rendering between mousedown and mouseup would swallow the click (e.g. leaving a gold
@@ -107,14 +126,18 @@ function requestRender() {
     }
 }
 
-document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
-document.addEventListener('pointerup', () => {
+function pointerReleased() {
     pointerDown = false;
     if (renderPending) {
         renderPending = false;
         setTimeout(render); // after the click event has been dispatched
     }
-}, true);
+}
+
+document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+document.addEventListener('pointerup', pointerReleased, true);
+// A touch that turns into a scroll ends with pointercancel, not pointerup.
+document.addEventListener('pointercancel', pointerReleased, true);
 
 // ---------- Helpers ----------
 
@@ -210,8 +233,9 @@ $('#login-form').addEventListener('submit', async e => {
     const submit = form.querySelector('[type=submit]');
     submit.disabled = true;
     try {
-        const { res, data } = await send('login', { password: form.elements.password.value });
-        if (!res.ok) {
+        // Queued behind a logout that may still be waiting to be sent (see below).
+        const { ok, data } = await enqueue(() => send('login', { password: form.elements.password.value }));
+        if (!ok) {
             error.textContent = data.error || 'Something went wrong';
             error.hidden = false;
             form.elements.password.select();
@@ -226,9 +250,15 @@ $('#login-form').addEventListener('submit', async e => {
     }
 });
 
-$('#logout').addEventListener('click', async () => {
-    await send('logout', {});
+// The page signs out at once, but the logout request waits for requests already underway
+// (including a sync), so none of them can renew the session cookie after it has been cleared.
+$('#logout').addEventListener('click', () => {
+    signOuts++;
     setSignedIn(false);
+    enqueue(async () => {
+        await syncRun?.catch(() => {});
+        await send('logout', {});
+    });
 });
 
 // ---------- Rendering ----------
@@ -307,7 +337,9 @@ function renderWeek() {
 
 function renderHistory() {
     const current = currentWeekKey();
-    const keys = Object.keys(state.completions).filter(k => k <= current).sort();
+    // The server rejects weeks before 2004 (isWeekKey in api.php); skipping them here too keeps
+    // damaged data from making the loop below endless (toKey doesn't pad years under 1000).
+    const keys = Object.keys(state.completions).filter(k => k >= '2004' && k <= current).sort();
     const oldest = keys[0] || current;
 
     let rows = '', allGold = 0, pastGold = 0, pastWeeks = 0;
@@ -363,17 +395,29 @@ function renderManage() {
 // The server refreshes levels and classes from the Blizzard API (armory.php). The page asks for
 // that whenever the last sync is older than state.autoSyncInterval, or from the Manage button.
 
-let syncing = false;
+let syncRun = null; // promise of the sync in progress
 let lastAutoSync = 0; // ms; keeps a failing server from being retried every minute
 
 function sync() {
-    if (syncing) return Promise.resolve();
-    syncing = true;
-    renderSyncStatus();
-    return api('sync', {}).finally(() => {
-        syncing = false;
+    if (!syncRun) {
+        syncRun = runSync().finally(() => {
+            syncRun = null;
+            renderSyncStatus();
+        });
         renderSyncStatus();
-    });
+    }
+    return syncRun;
+}
+
+// The Battle.net lookups take a while, so the sync bypasses the request queue rather than
+// holding up clicks. Its reply may then be older than theirs, so instead of showing it, the
+// state is fetched again through the queue.
+async function runSync() {
+    const signOutsBefore = signOuts;
+    const reply = await send('sync', {});
+    if (signOuts !== signOutsBefore) return;
+    check(reply);
+    await api('state');
 }
 
 function autoSync() {
@@ -398,8 +442,8 @@ function syncWarning(c) {
 
 function renderSyncStatus() {
     $('#sync').hidden = !state.armoryEnabled;
-    $('#sync-btn').disabled = syncing;
-    $('#sync-btn').textContent = syncing ? 'Syncing…' : 'Sync with Armory';
+    $('#sync-btn').disabled = !!syncRun;
+    $('#sync-btn').textContent = syncRun ? 'Syncing…' : 'Sync with Armory';
     const status = $('#sync-status');
     status.className = state.lastSyncError ? 'sync-error' : 'muted';
     status.textContent = state.lastSyncError ? `Last sync failed: ${state.lastSyncError}`
@@ -451,6 +495,7 @@ const forms = {
 };
 
 function resetForm(form) {
+    form.querySelectorAll('option[data-extra]').forEach(o => o.remove());
     form.reset();
     form.elements.id.value = '';
     form.querySelector('[type=submit]').textContent = 'Add';
@@ -466,6 +511,16 @@ for (const { form, action } of Object.values(forms)) {
     });
     form.querySelector('.cancel').addEventListener('click', () => resetForm(form));
 }
+
+// The server keeps gold to the hundred (goldAmount in api.php). Rather than let step="100"
+// refuse something like 1250, round it down and submit again.
+const goldField = forms.activities.form.elements.gold;
+goldField.addEventListener('invalid', e => {
+    if (!goldField.validity.stepMismatch || goldField.validity.rangeUnderflow) return;
+    e.preventDefault();
+    goldField.value = Math.floor(goldField.valueAsNumber / 100) * 100;
+    setTimeout(() => forms.activities.form.requestSubmit());
+});
 
 $('#char-form').elements.class.innerHTML = Object.keys(CLASSES)
     .map(c => `<option value="${c}">${c || 'Class…'}</option>`).join('');
@@ -551,7 +606,16 @@ $('#view-manage').addEventListener('click', e => {
         resetForm(form); // clears fields older items may not have (e.g. gold)
         form.elements.id.value = id;
         for (const [k, v] of Object.entries(item)) {
-            if (form.elements[k]) form.elements[k].value = v;
+            const field = form.elements[k];
+            if (!field) continue;
+            // A select only holds values it lists, so add any other (an imported minLevel of 70,
+            // a class missing from CLASSES) rather than quietly changing it on save.
+            if (field.tagName === 'SELECT' && ![...field.options].some(o => o.value === String(v))) {
+                const option = new Option(v, v);
+                option.dataset.extra = '';
+                field.add(option);
+            }
+            field.value = v;
         }
         form.querySelector('[type=submit]').textContent = 'Save';
         form.querySelector('.cancel').hidden = false;
@@ -568,8 +632,8 @@ setInterval(() => {
     if (now !== lastCurrent) {
         if (viewedWeek === lastCurrent) viewedWeek = now;
         lastCurrent = now;
-        render();
-    } else if (!document.activeElement?.matches('.gold-input')) {
+        requestRender();
+    } else if (!pointerDown && !document.activeElement?.matches('.gold-input')) {
         renderWeek();
     }
     renderSyncStatus();
