@@ -13,7 +13,7 @@ ENV GOLDMAKER_DATA_DIR=/data
 RUN mkdir /data && chown www-data:www-data /data
 VOLUME /data
 
-COPY --chown=www-data:www-data index.html app.js style.css api.php armory.php .htaccess /var/www/html/
+COPY --chown=www-data:www-data index.html app.js style.css favicon.png api.php armory.php .htaccess /var/www/html/
 
 ENTRYPOINT ["goldmaker-entrypoint"]
 CMD ["apache2-foreground"]
