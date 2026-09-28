@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Goldmaker – Weekly Tracker</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="signed-out">
+<header>
+    <h1>Goldmaker</h1>
+    <nav>
+        <button data-view="week" class="active">Week</button>
+        <button data-view="history">History</button>
+        <button data-view="manage">Manage</button>
+    </nav>
+    <button id="logout" class="link">Log out</button>
+</header>
+
+<form id="login-form" class="login" hidden>
+    <h2>Sign in</h2>
+    <input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    <div class="login-error" hidden></div>
+</form>
+
+<main hidden>
+    <section id="view-week">
+        <div class="week-nav">
+            <button id="prev-week" title="Previous week">&#9664;</button>
+            <div>
+                <div id="week-label" class="week-label"></div>
+                <div id="week-sub" class="muted"></div>
+            </div>
+            <button id="next-week" title="Next week">&#9654;</button>
+            <button id="this-week" class="link">Back to current week</button>
+        </div>
+        <div id="grid"></div>
+    </section>
+
+    <section id="view-history" hidden>
+        <div id="history"></div>
+    </section>
+
+    <section id="view-manage" hidden>
+        <div class="manage">
+            <div class="panel">
+                <h2>Characters</h2>
+                <form id="char-form">
+                    <input type="hidden" name="id">
+                    <input name="name" placeholder="Name" required>
+                    <input name="realm" placeholder="Realm (optional)">
+                    <select name="class"></select>
+                    <input name="level" type="number" min="1" max="90" value="80" title="Level">
+                    <button type="submit">Add</button>
+                    <button type="button" class="cancel link" hidden>Cancel</button>
+                </form>
+                <ul id="char-list" class="list"></ul>
+            </div>
+            <div class="panel">
+                <h2>Activities</h2>
+                <form id="act-form">
+                    <input type="hidden" name="id">
+                    <input name="name" placeholder="Activity name" required>
+                    <select name="minLevel">
+                        <option value="80">80+</option>
+                        <option value="90">Max level (90)</option>
+                        <option value="1">Any level</option>
+                    </select>
+                    <input name="gold" type="number" min="0" step="100" placeholder="Gold" title="Typical gold reward">
+                    <input name="notes" placeholder="Notes (optional)">
+                    <button type="submit">Add</button>
+                    <button type="button" class="cancel link" hidden>Cancel</button>
+                </form>
+                <ul id="act-list" class="list"></ul>
+            </div>
+        </div>
+    </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

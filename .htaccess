@@ -1,0 +1,12 @@
+# Hide dotfiles/folders (.git, .idea, .htaccess) and project files that aren't part of the site.
+RedirectMatch 404 "/\."
+<FilesMatch "^(CLAUDE\.md|config\.local\.php.*|Dockerfile)$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "same-origin"
+    # Inline styles are used for class colours and history bars; scripts must come from app.js.
+    Header always set Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
+</IfModule>
