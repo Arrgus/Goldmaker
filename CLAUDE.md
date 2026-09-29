@@ -85,6 +85,8 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 characters: [{id, name, realm, class, level, syncError?}]  // order = display order ("move" swaps neighbours)
 activities: [{id, name, minLevel, notes, gold}]  // gold = default reward; older entries may lack it
 completions: { "<weekKey>": { "<charId>": { "<actId>": gold|null } } }
+snapshots: { "<weekKey>": {characters, activities} }  // setup of closed weeks, see below
+lastWeek?: weekKey  // latest week a request came from
 lastSync?: unix time, lastSyncError?: string|null
 ```
 
@@ -93,8 +95,11 @@ lastSync?: unix time, lastSyncError?: string|null
 - **Completion gold is a snapshot** taken when the cell is ticked, so changing an activity's default later doesn't rewrite history. `null` means "use the activity's current default". Older data stored a plain list of activity IDs; `api.php` migrates those to `null` on every load.
 - **Gold is kept in whole hundreds.** The amounts are rough guides, so when an activity's default or a cell's gold is saved, `goldAmount()` in `api.php` drops the rest (1,250 → 1,200, 99 → 0). Values stored before this rule are left as they are.
 - **Eligibility:** a character can do an activity if `char.level >= act.minLevel`. Levels are clamped to 1–`MAX_LEVEL` (90, the current cap) in `api.php`, and armory levels are clamped too. When the cap rises, update `MAX_LEVEL`, the `max` attributes in `index.html` and the activity level options.
-- **Deleting** a character or activity keeps its completion history; entries with unknown IDs are ignored when rendering.
-- **History totals** are recomputed from the *current* characters, levels and activities, not from what existed in that week.
+- **Closed weeks keep their setup.** `send()` adds the browser's current week as `?week=` to every request. When it's later than `lastWeek`, `closeWeeks()` in `api.php` saves the data as it stands as `lastWeek`'s snapshot, *before* the request changes anything, since nothing changed after that week ended. That includes a `state` read, which then saves.
+  - A snapshot covers the weeks from its key up to the next one; one identical to the previous snapshot isn't stored. `weekSetup()` in `app.js` picks the right one: weeks from `lastWeek` on use the live data, and weeks older than every snapshot (from before this existed) use the oldest one.
+  - The grid, gold defaults and history totals of a past week all come from its snapshot. Ticking a cell in a closed week sends that snapshot's default gold.
+  - Snapshots are validated on every load and on import, with the same field rules (except gold, kept as it was).
+- **Deleting** a character or activity keeps its completion history, and it still shows in the weeks whose snapshot has it. Elsewhere entries with unknown IDs are ignored when rendering.
 - **Realms** are stored as typed by the user, in the in-game style without spaces (e.g. `ColinasPardas`); they are not Blizzard API slugs. The characters are on EU realms.
 
 ## Front-end conventions

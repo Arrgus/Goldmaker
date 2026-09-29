@@ -24,7 +24,7 @@ header('Cache-Control: no-store');
 
 function emptyState(): array
 {
-    return ['characters' => [], 'activities' => [], 'completions' => new stdClass()];
+    return ['characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass()];
 }
 
 function fail(string $message, int $code = 400): never
@@ -147,6 +147,64 @@ function normalizeCompletions(mixed $completions): array
     return $result;
 }
 
+// ---------- Closed weeks ----------
+// When a week closes, the characters (with their levels) and activities it had are kept as a
+// snapshot, so later changes don't rewrite how a past week looks. The server doesn't know when
+// the reset is (weekStart in app.js), so the page sends its current week with every request.
+// lastWeek is the latest week a request came from. When a request arrives from a later week,
+// the data hasn't changed since lastWeek ended, so it is saved as lastWeek's snapshot before the
+// request changes anything. Weeks without a request in between had the same setup, so a snapshot
+// covers every week from its key up to the next snapshot; identical ones are not stored twice.
+
+function snapshotActivity(array $in): array
+{
+    // Unlike an edit, a snapshot keeps gold exactly as it was (see goldAmount).
+    return array_merge(activityFields($in), ['gold' => max(0, (int) ($in['gold'] ?? 0))]);
+}
+
+function snapshotOf(array $setup): array
+{
+    return [
+        'characters' => importItems($setup['characters'] ?? null, 'c', 'characterFields'),
+        'activities' => importItems($setup['activities'] ?? null, 'a', 'snapshotActivity'),
+    ];
+}
+
+function normalizeSnapshots(mixed $snapshots): array
+{
+    $result = [];
+    foreach ((array) $snapshots as $week => $setup) {
+        if (!isWeekKey($week) || !is_array($setup)) {
+            fail("Bad week \"$week\" in snapshots");
+        }
+        $result[$week] = snapshotOf($setup);
+    }
+    ksort($result);
+    return $result;
+}
+
+// Returns true when it changed $state.
+function closeWeeks(array &$state, mixed $week): bool
+{
+    // A week key is a past Wednesday; the margin covers time zones ahead of the server's.
+    if (!isWeekKey($week) || $week > date('Y-m-d', time() + 86400)) {
+        return false;
+    }
+    $last = $state['lastWeek'] ?? null;
+    if ($last !== null && $week <= $last) {
+        return false;
+    }
+    if ($last !== null) {
+        $snapshot = snapshotOf($state);
+        if ($snapshot != (end($state['snapshots']) ?: null)) {
+            $state['snapshots'][$last] = $snapshot;
+            ksort($state['snapshots']);
+        }
+    }
+    $state['lastWeek'] = $week;
+    return true;
+}
+
 function importItems(mixed $items, string $prefix, callable $fields): array
 {
     if (!is_array($items) || !array_is_list($items)) {
@@ -200,6 +258,10 @@ function loadState(): array
     }
     $state += emptyState();
     $state['completions'] = normalizeCompletions($state['completions']);
+    $state['snapshots'] = normalizeSnapshots($state['snapshots']);
+    if (isset($state['lastWeek']) && !isWeekKey($state['lastWeek'])) {
+        fail('Bad lastWeek "' . text($state['lastWeek']) . '" in the data file', 500);
+    }
     return $state;
 }
 
@@ -357,6 +419,7 @@ if ($action === 'sync') {
 $lock = fopen(LOCK_FILE, 'c');
 flock($lock, LOCK_EX);
 $state = loadState();
+$changed = closeWeeks($state, $_GET['week'] ?? null);
 
 switch ($action) {
     case 'state':
@@ -445,7 +508,12 @@ switch ($action) {
             'characters' => importItems($data['characters'] ?? null, 'c', 'characterFields'),
             'activities' => importItems($data['activities'] ?? null, 'a', 'activityFields'),
             'completions' => normalizeCompletions($data['completions'] ?? []),
+            'snapshots' => normalizeSnapshots($data['snapshots'] ?? []),
         ];
+        if (isWeekKey($data['lastWeek'] ?? null)) {
+            // The next request closes the file's last week with the imported setup.
+            $imported['lastWeek'] = $data['lastWeek'];
+        }
         if (is_file(DATA_FILE) && !@copy(DATA_FILE, DATA_DIR . '/backup-' . date('Y-m-d-His') . '.json')) {
             fail('Could not back up the current data, so nothing was imported', 500);
         }
@@ -478,13 +546,14 @@ switch ($action) {
         fail('Unknown action');
 }
 
-if ($action !== 'state') {
+if ($action !== 'state' || $changed) {
     saveState($state);
 }
 flock($lock, LOCK_UN);
 fclose($lock);
 
 $state['completions'] = (object) $state['completions'];
+$state['snapshots'] = (object) $state['snapshots'];
 $state['armoryEnabled'] = armoryConfigured();
 $state['autoSyncInterval'] = AUTO_SYNC_INTERVAL;
 echo json_encode($state);

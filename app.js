@@ -78,7 +78,8 @@ let signOuts = 0;
 // a redeploy) comes back as an ordinary error.
 async function send(action, body) {
     try {
-        const res = await fetch(`api.php?action=${action}`, {
+        // The server closes past weeks by this (closeWeeks in api.php).
+        const res = await fetch(`api.php?action=${action}&week=${currentWeekKey()}`, {
             method: body ? 'POST' : 'GET',
             headers: { 'Content-Type': 'application/json' },
             body: body ? JSON.stringify(body) : undefined,
@@ -151,6 +152,18 @@ function eligible(char, act) {
     return char.level >= act.minLevel;
 }
 
+// Characters and activities as they were in a week. The server keeps a snapshot of each closed
+// week (closeWeeks in api.php): a snapshot covers the weeks from its key up to the next one.
+// Weeks from lastWeek on haven't closed yet and use the live data, as do all weeks until the first
+// snapshot exists. Weeks from before snapshots existed use the oldest one.
+function weekSetup(week) {
+    const keys = Object.keys(state.snapshots || {}).sort();
+    if (!keys.length || !state.lastWeek || week >= state.lastWeek) {
+        return { characters: state.characters, activities: state.activities, live: true };
+    }
+    return state.snapshots[keys.findLast(k => k <= week) ?? keys[0]];
+}
+
 function isDone(week, charId, actId) {
     const entries = state.completions[week]?.[charId];
     return !!entries && Object.hasOwn(entries, actId);
@@ -193,9 +206,10 @@ function charName(c) {
 
 function weekStats(week) {
     let done = 0, total = 0, gold = 0;
-    const perChar = state.characters.map(c => {
+    const { characters, activities } = weekSetup(week);
+    const perChar = characters.map(c => {
         let d = 0, t = 0, g = 0;
-        for (const a of state.activities) {
+        for (const a of activities) {
             if (!eligible(c, a)) continue;
             t++;
             if (isDone(week, c.id, a.id)) {
@@ -285,9 +299,11 @@ function renderWeek() {
         $('#week-sub').textContent = 'Past week, click cells to fix entries';
     }
 
-    const { characters: chars, activities: acts } = state;
+    const { characters: chars, activities: acts, live } = weekSetup(viewedWeek);
     if (!chars.length || !acts.length) {
-        $('#grid').innerHTML = '<div class="empty">Add some characters and activities under <b>Manage</b> to get started.</div>';
+        $('#grid').innerHTML = live
+            ? '<div class="empty">Add some characters and activities under <b>Manage</b> to get started.</div>'
+            : '<div class="empty">There were no characters or activities this week.</div>';
         return;
     }
 
@@ -365,7 +381,7 @@ function renderHistory() {
         <div><span class="muted">Total earned</span><b>${fmtGold(allGold)}</b></div>
         ${pastWeeks ? `<div><span class="muted">Average per finished week</span><b>${fmtGold(pastGold / pastWeeks)}</b></div>` : ''}
     </div>`;
-    html += rows + '<p class="muted">Totals use your current characters, levels and activities.</p>';
+    html += rows + '<p class="muted">Past weeks use the characters, levels and activities they had at the reset.</p>';
     $('#history').innerHTML = html;
 }
 
@@ -546,7 +562,11 @@ $('#grid').addEventListener('click', e => {
         editGold(btn, char, act);
     } else {
         const done = !isDone(viewedWeek, char, act);
-        api('toggle', { week: viewedWeek, charId: char, actId: act, done }).then(() => {
+        const body = { week: viewedWeek, charId: char, actId: act, done };
+        // The server would use the activity's current default; a closed week uses its own.
+        const setup = weekSetup(viewedWeek);
+        if (done && !setup.live) body.gold = setup.activities.find(a => a.id === act)?.gold || 0;
+        api('toggle', body).then(() => {
             // Jump straight into the gold field so a non-default amount can just be typed.
             const goldBtn = done && $(`#grid .gold-edit[data-char="${char}"][data-act="${act}"]`);
             if (goldBtn) editGold(goldBtn, char, act);
@@ -556,7 +576,7 @@ $('#grid').addEventListener('click', e => {
 
 // Swap the gold label for an input; Enter/blur saves, Escape cancels, empty resets to the default.
 function editGold(btn, charId, actId) {
-    const act = state.activities.find(a => a.id === actId);
+    const act = weekSetup(viewedWeek).activities.find(a => a.id === actId);
     const input = document.createElement('input');
     input.className = 'gold-input';
     const initial = String(goldOf(viewedWeek, charId, act));

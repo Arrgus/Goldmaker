@@ -184,6 +184,22 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     await sleep(20);
     check('pointercancel releases the render hold', app('pointerDown') === false && app('renderPending') === false);
 
+    // Closed weeks are counted with their snapshot, not with today's characters and levels.
+    const saved = app('state');
+    app(`state = {
+        characters: [{ id: 'c1', level: 90 }, { id: 'c2', level: 90 }],
+        activities: [{ id: 'a1', minLevel: 90, gold: 100 }],
+        completions: { '2026-09-02': { c1: { a1: 100 } }, '2026-09-16': { c1: { a1: 100 } } },
+        snapshots: { '2026-09-09': { characters: [{ id: 'c1', level: 90 }], activities: [{ id: 'a1', minLevel: 90, gold: 100 }] } },
+        lastWeek: '2026-09-23',
+    }`);
+    const total = week => { const s = app(`weekStats('${week}')`); return `${s.done}/${s.total}`; };
+    check('a closed week uses the snapshot in force', total('2026-09-16') === '1/1', total('2026-09-16'));
+    check('weeks before the first snapshot use the oldest one', total('2026-09-02') === '1/1', total('2026-09-02'));
+    check('the open week uses the live data', total('2026-09-23') === '0/2', total('2026-09-23'));
+    context.saved = saved;
+    app('state = saved');
+
     console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
     process.exitCode = failed ? 1 : 0;
 })();

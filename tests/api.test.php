@@ -226,6 +226,38 @@ file_put_contents($dataFile, '');
 check('an empty data file is a fresh start', $status === 200 && $state['characters'] === [], [$status, $state]);
 file_put_contents($dataFile, $good);
 
+// ---------- Closing weeks ----------
+
+[, $state] = call('saveCharacter', ['name' => 'Leveler', 'level' => 80]);
+$leveler = end($state['characters'])['id'];
+$levelIn = fn(array $state, string $week) => array_column($state['snapshots'][$week]['characters'] ?? [], 'level', 'id')[$leveler] ?? null;
+
+[, $state] = call('state&week=2026-09-02');
+check('the first request only records the week', $state['lastWeek'] === '2026-09-02' && $state['snapshots'] === [], $state['lastWeek'] ?? null);
+call('saveCharacter', ['id' => $leveler, 'name' => 'Leveler', 'level' => 85]);
+[, $state] = call('state&week=2026-09-09');
+check('a new week keeps the old one as a snapshot', $levelIn($state, '2026-09-02') === 85, $state['snapshots']);
+check('closing a week is saved, even on a read', isset(json_decode(file_get_contents($dataFile), true)['snapshots']['2026-09-02']));
+[, $state] = call('saveCharacter', ['id' => $leveler, 'name' => 'Leveler', 'level' => 90, 'week' => '2026-09-09']);
+check('changes after the reset leave the closed week alone', $levelIn($state, '2026-09-02') === 85, $state['snapshots']);
+[, $state] = call('state&week=2026-09-02');
+check('a request from an older week closes nothing', $state['lastWeek'] === '2026-09-09' && count($state['snapshots']) === 1, $state['lastWeek']);
+[, $state] = call('state&week=2026-09-16');
+check('the next week gets its own snapshot', $levelIn($state, '2026-09-09') === 90, $state['snapshots']);
+[, $state] = call('state&week=2026-09-23');
+check('an unchanged week is not stored again', count($state['snapshots']) === 2 && $state['lastWeek'] === '2026-09-23', array_keys($state['snapshots']));
+[, $state] = call("state&week=$tooLate");
+check('a week in the future is ignored', $state['lastWeek'] === '2026-09-23', $state['lastWeek']);
+
+$export = json_decode(file_get_contents($dataFile), true);
+[$status, $state] = call('import', ['data' => $export]);
+check('an import keeps the snapshots', $status === 200 && $levelIn($state, '2026-09-02') === 85 && $state['lastWeek'] === '2026-09-23', $status);
+$before = file_get_contents($dataFile);
+$badSnapshot = $export;
+$badSnapshot['snapshots']['2026-09-02']['characters'][0]['id'] = 'cXYZ';
+[$status] = call('import', ['data' => $badSnapshot]);
+check('an import with a bad snapshot id is refused', $status === 400 && file_get_contents($dataFile) === $before, $status);
+
 // ---------- Signing out ----------
 
 call('logout', []);
