@@ -258,6 +258,42 @@ $badSnapshot['snapshots']['2026-09-02']['characters'][0]['id'] = 'cXYZ';
 [$status] = call('import', ['data' => $badSnapshot]);
 check('an import with a bad snapshot id is refused', $status === 400 && file_get_contents($dataFile) === $before, $status);
 
+// ---------- Deposits ----------
+
+check('a fresh data file tracks deposits from the start', $state['depositsFrom'] === null, $state['depositsFrom'] ?? 'missing');
+$old = json_decode(file_get_contents($dataFile), true);
+unset($old['depositsFrom']);
+file_put_contents($dataFile, json_encode($old));
+[, $state] = call('state&week=2026-09-30');
+check('data from before deposits starts tracking at its lastWeek', $state['depositsFrom'] === '2026-09-23', $state['depositsFrom'] ?? null);
+$deposit = fn(array $extra) => call('deposit', $extra + ['week' => $week, 'charId' => $char['id']]);
+$depositGold = fn(array $state) => array_column($state['deposits'][$week][$char['id']] ?? [], 'gold');
+$deposit(['gold' => 1200]);
+[, $state] = $deposit(['gold' => 1250]);
+check('deposits add up as a list, kept to the gold', $depositGold($state) === [1200, 1250], $state['deposits']);
+[, $state] = $deposit(['undo' => true]);
+check('undo removes the latest deposit', $depositGold($state) === [1200], $state['deposits']);
+[, $state] = $deposit(['undo' => true]);
+check('undoing the last one removes the week', $state['deposits'] === [], $state['deposits']);
+foreach ([['gold' => 0], ['gold' => 'x'], ['gold' => 100, 'charId' => 'cXYZ'], ['gold' => 100, 'week' => '2026-09-24']] as $bad) {
+    [$status] = $deposit($bad);
+    check('the deposit ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+
+[, $state] = $deposit(['gold' => 500]);
+$export = json_decode(file_get_contents($dataFile), true);
+[$status, $state] = call('import', ['data' => $export]);
+check('an import keeps deposits and depositsFrom', $status === 200 && $depositGold($state) === [500] && $state['depositsFrom'] === '2026-09-23', $status);
+$before = file_get_contents($dataFile);
+$badDeposit = $export;
+$badDeposit['deposits'][$week][$char['id']][0]['gold'] = -5;
+[$status] = call('import', ['data' => $badDeposit]);
+check('an import with a bad deposit is refused', $status === 400 && file_get_contents($dataFile) === $before, $status);
+$fresh = $export;
+unset($fresh['depositsFrom'], $fresh['lastWeek']);
+[, $state] = call('import', ['data' => $fresh]);
+check('a file without lastWeek tracks deposits from the start', $state['depositsFrom'] === null, $state['depositsFrom'] ?? 'missing');
+
 // ---------- Signing out ----------
 
 call('logout', []);

@@ -24,7 +24,11 @@ header('Cache-Control: no-store');
 
 function emptyState(): array
 {
-    return ['characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass()];
+    // No depositsFrom: a missing one is filled in from lastWeek (see depositsFrom).
+    return [
+        'characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass(),
+        'deposits' => new stdClass(),
+    ];
 }
 
 function fail(string $message, int $code = 400): never
@@ -147,6 +151,42 @@ function normalizeCompletions(mixed $completions): array
     return $result;
 }
 
+// Deposits record the gold a character has taken to the bank: week => charId => [{gold, time}].
+// A character can be deposited more than once a week (more activities after the first deposit),
+// so app.js compares the sum with what the character earned that week.
+function normalizeDeposits(mixed $deposits): array
+{
+    $result = [];
+    foreach ((array) $deposits as $week => $chars) {
+        if (!isWeekKey($week)) {
+            fail("Bad week \"$week\" in deposits");
+        }
+        foreach ((array) $chars as $charId => $list) {
+            if (!isId($charId, 'c') || !is_array($list) || !array_is_list($list)) {
+                fail("Bad character id \"$charId\" in deposits");
+            }
+            foreach ($list as $deposit) {
+                if (!is_int($deposit['gold'] ?? null) || $deposit['gold'] <= 0 || !is_int($deposit['time'] ?? null)) {
+                    fail("Bad deposit for \"$charId\" in week $week");
+                }
+                $result[$week][$charId][] = ['gold' => $deposit['gold'], 'time' => $deposit['time']];
+            }
+        }
+    }
+    return $result;
+}
+
+// Weeks before depositsFrom were played before deposits were tracked, so app.js treats their gold
+// as banked. Data from before this existed starts tracking at its lastWeek; a fresh file at once.
+function depositsFrom(array $data): ?string
+{
+    $from = array_key_exists('depositsFrom', $data) ? $data['depositsFrom'] : ($data['lastWeek'] ?? null);
+    if ($from !== null && !isWeekKey($from)) {
+        fail('Bad depositsFrom "' . text($from) . '"');
+    }
+    return $from;
+}
+
 // ---------- Closed weeks ----------
 // When a week closes, the characters (with their levels) and activities it had are kept as a
 // snapshot, so later changes don't rewrite how a past week looks. The server doesn't know when
@@ -259,6 +299,7 @@ function loadState(): array
     $state += emptyState();
     $state['completions'] = normalizeCompletions($state['completions']);
     $state['snapshots'] = normalizeSnapshots($state['snapshots']);
+    $state['deposits'] = normalizeDeposits($state['deposits']);
     if (isset($state['lastWeek']) && !isWeekKey($state['lastWeek'])) {
         fail('Bad lastWeek "' . text($state['lastWeek']) . '" in the data file', 500);
     }
@@ -419,6 +460,9 @@ if ($action === 'sync') {
 $lock = fopen(LOCK_FILE, 'c');
 flock($lock, LOCK_EX);
 $state = loadState();
+// Before closeWeeks moves lastWeek on, so that tracking starts with the week the data was last used
+// in. Until the next save this is worked out again on every load, with the same result.
+$state['depositsFrom'] = depositsFrom($state);
 $changed = closeWeeks($state, $_GET['week'] ?? null);
 
 switch ($action) {
@@ -497,6 +541,33 @@ switch ($action) {
         }
         break;
 
+    case 'deposit':
+        // Adds a deposit of the given gold, or with "undo" removes the latest one.
+        $week = $in['week'] ?? null;
+        $charId = $in['charId'] ?? null;
+        if (!isWeekKey($week) || !isId($charId, 'c')) {
+            fail('Bad deposit');
+        }
+        $list = $state['deposits'][$week][$charId] ?? [];
+        if (!empty($in['undo'])) {
+            array_pop($list);
+        } else {
+            $gold = is_numeric($in['gold'] ?? null) ? (int) $in['gold'] : 0;
+            if ($gold <= 0) {
+                fail('Nothing to deposit');
+            }
+            $list[] = ['gold' => $gold, 'time' => time()];
+        }
+        if ($list) {
+            $state['deposits'][$week][$charId] = $list;
+        } else {
+            unset($state['deposits'][$week][$charId]);
+            if (empty($state['deposits'][$week])) {
+                unset($state['deposits'][$week]);
+            }
+        }
+        break;
+
     case 'import':
         // Replaces everything with an uploaded goldmaker.json. The old file is kept as a backup
         // next to it; lastSync is dropped so the page re-syncs levels from the armory.
@@ -509,6 +580,8 @@ switch ($action) {
             'activities' => importItems($data['activities'] ?? null, 'a', 'activityFields'),
             'completions' => normalizeCompletions($data['completions'] ?? []),
             'snapshots' => normalizeSnapshots($data['snapshots'] ?? []),
+            'deposits' => normalizeDeposits($data['deposits'] ?? []),
+            'depositsFrom' => depositsFrom($data),
         ];
         if (isWeekKey($data['lastWeek'] ?? null)) {
             // The next request closes the file's last week with the imported setup.
@@ -554,6 +627,7 @@ fclose($lock);
 
 $state['completions'] = (object) $state['completions'];
 $state['snapshots'] = (object) $state['snapshots'];
+$state['deposits'] = (object) $state['deposits'];
 $state['armoryEnabled'] = armoryConfigured();
 $state['autoSyncInterval'] = AUTO_SYNC_INTERVAL;
 echo json_encode($state);

@@ -37,7 +37,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 
 ## Architecture
 
-**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `import`, `sync`).
+**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `import`, `sync`).
 - **Auth runs before the data file is opened.**
   - There is a single shared password. The `goldmaker_session` cookie holds `expiry.hmac`, keyed by that password, so there is no server-side session storage and changing the password signs everyone out. The cookie is renewed once it's more than halfway to expiry.
   - Every action except `state` must be a POST with a JSON content type (the CSRF defence, together with the SameSite=Lax cookie).
@@ -86,6 +86,8 @@ characters: [{id, name, realm, class, level, syncError?}]  // order = display or
 activities: [{id, name, minLevel, notes, gold}]  // gold = default reward; older entries may lack it
 completions: { "<weekKey>": { "<charId>": { "<actId>": gold|null } } }
 snapshots: { "<weekKey>": {characters, activities} }  // setup of closed weeks, see below
+deposits: { "<weekKey>": { "<charId>": [{gold, time}] } }  // gold taken to the bank, see below
+depositsFrom: weekKey|null  // weeks before it count as banked
 lastWeek?: weekKey  // latest week a request came from
 lastSync?: unix time, lastSyncError?: string|null
 ```
@@ -99,6 +101,10 @@ lastSync?: unix time, lastSyncError?: string|null
   - A snapshot covers the weeks from its key up to the next one; one identical to the previous snapshot isn't stored. `weekSetup()` in `app.js` picks the right one: weeks from `lastWeek` on use the live data, and weeks older than every snapshot (from before this existed) use the oldest one.
   - The grid, gold defaults and history totals of a past week all come from its snapshot. Ticking a cell in a closed week sends that snapshot's default gold.
   - Snapshots are validated on every load and on import, with the same field rules (except gold, kept as it was).
+- **Bank deposits.** The row total of each character has a Deposit button that records the gold not yet banked that week (earned minus the sum of its deposits) as a new deposit, with a timestamp. Doing more activities afterwards makes the button come back with just the new amount. Once everything is banked it shows "Banked ✔"; clicking it undoes the latest deposit (`deposit` with `undo`). The grid footer and the History view show what is still to deposit.
+  - Deposits are stored as given; they aren't kept to the hundred. Unticking a cell never removes a deposit, so a character can show more deposited than earned, which counts as fully banked.
+  - `depositsFrom` stops weeks from before the feature existing from showing up as unbanked. A file without it starts tracking at its `lastWeek` (null when it has none, meaning every week is tracked); `api.php` fills it in on load and stores it with the next save. The import does the same.
+  - Deposits are validated on every load and on import, like completions.
 - **Deleting** a character or activity keeps its completion history, and it still shows in the weeks whose snapshot has it. Elsewhere entries with unknown IDs are ignored when rendering.
 - **Realms** are stored as typed by the user, in the in-game style without spaces (e.g. `ColinasPardas`); they are not Blizzard API slugs. The characters are on EU realms.
 

@@ -17,7 +17,7 @@ const CLASSES = {
     'Warrior': '#C69B6D',
 };
 
-let state = { characters: [], activities: [], completions: {} };
+let state = { characters: [], activities: [], completions: {}, deposits: {} };
 let viewedWeek = currentWeekKey();
 
 // ---------- Weeks ----------
@@ -174,6 +174,16 @@ function goldOf(week, charId, act) {
     return state.completions[week]?.[charId]?.[act.id] ?? (act.gold || 0);
 }
 
+// Gold taken to the bank, as a list of deposits: a character can go back for more activities.
+function depositsOf(week, charId) {
+    return state.deposits?.[week]?.[charId] || [];
+}
+
+// Weeks before depositsFrom were played before deposits were tracked and count as banked.
+function tracksDeposits(week) {
+    return !state.depositsFrom || week >= state.depositsFrom;
+}
+
 function fmtGold(n) {
     return `${Math.round(n).toLocaleString()}g`;
 }
@@ -205,7 +215,7 @@ function charName(c) {
 }
 
 function weekStats(week) {
-    let done = 0, total = 0, gold = 0;
+    let done = 0, total = 0, gold = 0, pending = 0;
     const { characters, activities } = weekSetup(week);
     const perChar = characters.map(c => {
         let d = 0, t = 0, g = 0;
@@ -217,12 +227,16 @@ function weekStats(week) {
                 g += goldOf(week, c.id, a);
             }
         }
+        const deposits = depositsOf(week, c.id);
+        const deposited = deposits.reduce((sum, dep) => sum + dep.gold, 0);
+        const p = tracksDeposits(week) ? Math.max(0, g - deposited) : 0;
         done += d;
         total += t;
         gold += g;
-        return { char: c, done: d, total: t, gold: g };
+        pending += p;
+        return { char: c, done: d, total: t, gold: g, deposits, deposited, pending: p };
     });
-    return { done, total, gold, perChar };
+    return { done, total, gold, pending, perChar };
 }
 
 // ---------- Login ----------
@@ -234,7 +248,7 @@ function setSignedIn(signedIn) {
     $('#login-form').hidden = signedIn;
     if (!signedIn && wasSignedIn) {
         // Don't leave the previous data sitting in the page.
-        state = { characters: [], activities: [], completions: {} };
+        state = { characters: [], activities: [], completions: {}, deposits: {} };
         render();
     }
     if (!signedIn) $('#login-form').elements.password.focus();
@@ -317,7 +331,7 @@ function renderWeek() {
     html += '<th></th></tr></thead><tbody>';
 
     const colTotals = acts.map(() => ({ done: 0, total: 0, gold: 0 }));
-    stats.perChar.forEach(({ char: c, done, total, gold }) => {
+    stats.perChar.forEach(({ char: c, done, total, gold, ...bank }) => {
         html += `<tr><th>${charName(c)}<span class="lvl">${c.level}${c.realm ? ' · ' + esc(c.realm) : ''}${syncWarning(c)}</span></th>`;
         acts.forEach((a, i) => {
             if (!eligible(c, a)) {
@@ -340,15 +354,33 @@ function renderWeek() {
                 + `<button class="gold-edit${custom ? ' custom' : ''}" ${ids} title="Click to change gold">${fmtShort(g)}</button></td>`;
         });
         html += `<td class="row-total${total && done === total ? ' all-done' : ''}">${done}/${total}`
-            + `${gold ? `<span class="gold">${fmtGold(gold)}</span>` : ''}</td></tr>`;
+            + `${gold ? `<span class="gold">${fmtGold(gold)}</span>` : ''}${depositButton(c, bank)}</td></tr>`;
     });
 
     html += '</tbody><tfoot><tr><td></td>';
     for (const col of colTotals) {
         html += `<td class="${col.total && col.done === col.total ? 'all-done' : ''}">${col.done}/${col.total}<span class="gold">${fmtGold(col.gold)}</span></td>`;
     }
-    html += `<td>${stats.done}/${stats.total}<span class="gold">${fmtGold(stats.gold)}</span></td></tr></tfoot></table>`;
+    html += `<td>${stats.done}/${stats.total}<span class="gold">${fmtGold(stats.gold)}</span>`
+        + `${stats.pending ? `<span class="to-deposit">${fmtGold(stats.pending)} to deposit</span>` : ''}</td></tr></tfoot></table>`;
     $('#grid').innerHTML = html;
+}
+
+// Under a character's weekly total: a button to record a deposit of the gold not yet banked, or,
+// once everything is banked, a mark that undoes the latest deposit.
+function depositButton(c, { deposits, deposited, pending }) {
+    if (!tracksDeposits(viewedWeek)) return '';
+    const when = t => new Date(t * 1000).toLocaleString(undefined,
+        { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const history = deposits.length
+        ? 'Deposited:' + deposits.map(d => `\n${fmtGold(d.gold)} on ${when(d.time)}`).join('') : '';
+    if (pending) {
+        const label = deposited ? `Deposit +${fmtShort(pending)}` : 'Deposit';
+        const title = `${esc(c.name)}: mark ${fmtGold(pending)} as deposited in the bank${history ? '\n\n' + history : ''}`;
+        return `<button class="deposit" data-deposit="${c.id}" data-gold="${pending}" title="${title}">${label}</button>`;
+    }
+    if (!deposited) return '';
+    return `<button class="deposit banked" data-undo-deposit="${c.id}" title="${history}\n\nClick to undo the last deposit">Banked ✔</button>`;
 }
 
 function renderHistory() {
@@ -358,10 +390,11 @@ function renderHistory() {
     const keys = Object.keys(state.completions).filter(k => k >= '2004' && k <= current).sort();
     const oldest = keys[0] || current;
 
-    let rows = '', allGold = 0, pastGold = 0, pastWeeks = 0;
+    let rows = '', allGold = 0, pastGold = 0, pastWeeks = 0, allPending = 0;
     for (let k = current; k >= oldest; k = shiftWeek(k, -1)) {
         const s = weekStats(k);
         allGold += s.gold;
+        allPending += s.pending;
         if (k !== current) {
             pastGold += s.gold;
             pastWeeks++;
@@ -372,7 +405,7 @@ function renderHistory() {
             <div class="when">${esc(weekLabel(k))}${k === current ? '<span class="badge-current">current</span>' : ''}</div>
             <div class="bar"><div style="width:${pct}%"></div></div>
             <div class="total">${s.done}/${s.total}</div>
-            <div class="week-gold">${fmtGold(s.gold)}</div>
+            <div class="week-gold">${fmtGold(s.gold)}${s.pending ? `<span class="to-deposit">${fmtGold(s.pending)} to deposit</span>` : ''}</div>
             <div class="chars">${chars}</div>
         </div>`;
     }
@@ -380,6 +413,7 @@ function renderHistory() {
     let html = `<div class="summary">
         <div><span class="muted">Total earned</span><b>${fmtGold(allGold)}</b></div>
         ${pastWeeks ? `<div><span class="muted">Average per finished week</span><b>${fmtGold(pastGold / pastWeeks)}</b></div>` : ''}
+        ${allPending ? `<div><span class="muted">Not deposited yet</span><b class="to-deposit">${fmtGold(allPending)}</b></div>` : ''}
     </div>`;
     html += rows + '<p class="muted">Past weeks use the characters, levels and activities they had at the reset.</p>';
     $('#history').innerHTML = html;
@@ -555,6 +589,21 @@ $('#next-week').addEventListener('click', () => { viewedWeek = shiftWeek(viewedW
 $('#this-week').addEventListener('click', () => { viewedWeek = currentWeekKey(); renderWeek(); });
 
 $('#grid').addEventListener('click', e => {
+    const deposit = e.target.closest('button[data-deposit]');
+    if (deposit) {
+        api('deposit', { week: viewedWeek, charId: deposit.dataset.deposit, gold: Number(deposit.dataset.gold) });
+        return;
+    }
+    const undo = e.target.closest('button[data-undo-deposit]');
+    if (undo) {
+        const charId = undo.dataset.undoDeposit;
+        const last = depositsOf(viewedWeek, charId).at(-1);
+        const name = state.characters.find(c => c.id === charId)?.name ?? 'this character';
+        if (last && confirm(`Undo the last deposit of ${fmtGold(last.gold)} for ${name}?`)) {
+            api('deposit', { week: viewedWeek, charId, undo: true });
+        }
+        return;
+    }
     const btn = e.target.closest('button[data-char]');
     if (!btn) return;
     const { char, act } = btn.dataset;

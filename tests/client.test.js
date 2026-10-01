@@ -197,6 +197,21 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     check('a closed week uses the snapshot in force', total('2026-09-16') === '1/1', total('2026-09-16'));
     check('weeks before the first snapshot use the oldest one', total('2026-09-02') === '1/1', total('2026-09-02'));
     check('the open week uses the live data', total('2026-09-23') === '0/2', total('2026-09-23'));
+
+    // Gold still to deposit: what was earned minus what was banked, only from depositsFrom on.
+    app(`state = {
+        characters: [{ id: 'c1', level: 90 }],
+        activities: [{ id: 'a1', minLevel: 90, gold: 1000 }, { id: 'a2', minLevel: 90, gold: 500 }],
+        completions: { '2026-09-16': { c1: { a1: null } }, '2026-09-23': { c1: { a1: null, a2: 700 } } },
+        snapshots: {}, deposits: { '2026-09-23': { c1: [{ gold: 1000, time: 0 }] } },
+        depositsFrom: '2026-09-23',
+    }`);
+    const pending = week => app(`weekStats('${week}').pending`);
+    check('a second visit leaves only the new gold to deposit', pending('2026-09-23') === 700, pending('2026-09-23'));
+    check('weeks before depositsFrom count as banked', pending('2026-09-16') === 0, pending('2026-09-16'));
+    app(`state.deposits['2026-09-23'].c1.push({ gold: 900, time: 0 })`);
+    check('depositing more than earned leaves nothing to deposit', pending('2026-09-23') === 0, pending('2026-09-23'));
+
     context.saved = saved;
     app('state = saved');
 
