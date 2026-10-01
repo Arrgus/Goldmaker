@@ -1,4 +1,4 @@
 /config.local.php
 /data/*
 !/data/.htaccess
-/.idea/workspace.xml
+/.idea/
