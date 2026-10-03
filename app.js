@@ -184,6 +184,31 @@ function tracksDeposits(week) {
     return !state.depositsFrom || week >= state.depositsFrom;
 }
 
+// Materials an activity drops that are sold on the Auction House (Naxxramas: Wartorn Scrap and
+// Frozen Runes). Each run records how many dropped; they're worth what the week's prices say.
+// They're sold from one character, so their value counts as earned but never as gold to deposit.
+function materialsOf(act) {
+    return act?.materials || [];
+}
+
+function lootOf(week, charId, actId) {
+    return state.loot?.[week]?.[charId]?.[actId] || {};
+}
+
+// A price holds from the week it was set until a later week sets another. Weeks before the first
+// price use that one.
+function priceOf(week, matId) {
+    const prices = state.prices || {};
+    const weeks = Object.keys(prices).filter(k => Object.hasOwn(prices[k], matId)).sort();
+    const from = weeks.findLast(k => k <= week) ?? weeks[0];
+    return { price: from ? prices[from][matId] : 0, from };
+}
+
+function lootValue(week, charId, act) {
+    const counts = lootOf(week, charId, act.id);
+    return materialsOf(act).reduce((sum, m) => sum + (counts[m.id] || 0) * priceOf(week, m.id).price, 0);
+}
+
 function fmtGold(n) {
     return `${Math.round(n).toLocaleString()}g`;
 }
@@ -196,12 +221,27 @@ function fmtShort(n) {
 // point are read as thousands ("19" = 19k, "1.2" = 1.2k), since sub-1k rewards are rare.
 // Empty means "use the default" (null); garbage is NaN.
 function parseGold(str) {
+    return parseAmount(str, true);
+}
+
+// A material's price per unit: like parseGold, but small numbers are gold ("45" = 45g).
+function parsePrice(str) {
+    return parseAmount(str, false);
+}
+
+function parseAmount(str, shortMeansThousands) {
     const s = str.trim().toLowerCase().replace(/[\s,g]/g, '');
     if (s === '') return null;
     const m = s.match(/^(\d+)(\.\d+)?(k?)$/);
     if (!m) return NaN;
-    const thousands = m[3] || m[1].length <= 2;
+    const thousands = m[3] || (shortMeansThousands && m[1].length <= 2);
     return Math.round(parseFloat(m[1] + (m[2] || '')) * (thousands ? 1000 : 1));
+}
+
+// How many of a material dropped: a whole number, empty for none.
+function parseCount(str) {
+    const s = str.trim();
+    return s === '' ? 0 : /^\d+$/.test(s) ? Number(s) : NaN;
 }
 
 function reqBadge(act) {
@@ -214,17 +254,19 @@ function charName(c) {
     return `<span style="color:${CLASSES[c.class] || CLASSES['']}">${esc(c.name)}</span>`;
 }
 
+// gold is the gold earned, mats the value of the materials looted; only gold is deposited.
 function weekStats(week) {
-    let done = 0, total = 0, gold = 0, pending = 0;
+    let done = 0, total = 0, gold = 0, mats = 0, pending = 0;
     const { characters, activities } = weekSetup(week);
     const perChar = characters.map(c => {
-        let d = 0, t = 0, g = 0;
+        let d = 0, t = 0, g = 0, m = 0;
         for (const a of activities) {
             if (!eligible(c, a)) continue;
             t++;
             if (isDone(week, c.id, a.id)) {
                 d++;
                 g += goldOf(week, c.id, a);
+                m += lootValue(week, c.id, a);
             }
         }
         const deposits = depositsOf(week, c.id);
@@ -233,10 +275,11 @@ function weekStats(week) {
         done += d;
         total += t;
         gold += g;
+        mats += m;
         pending += p;
-        return { char: c, done: d, total: t, gold: g, deposits, deposited, pending: p };
+        return { char: c, done: d, total: t, gold: g, mats: m, deposits, deposited, pending: p };
     });
-    return { done, total, gold, pending, perChar };
+    return { done, total, gold, mats, pending, perChar };
 }
 
 // ---------- Login ----------
@@ -331,7 +374,7 @@ function renderWeek() {
     html += '<th></th></tr></thead><tbody>';
 
     const colTotals = acts.map(() => ({ done: 0, total: 0, gold: 0 }));
-    stats.perChar.forEach(({ char: c, done, total, gold, ...bank }) => {
+    stats.perChar.forEach(({ char: c, done, total, gold, mats, ...bank }) => {
         html += `<tr><th>${charName(c)}<span class="lvl">${c.level}${c.realm ? ' · ' + esc(c.realm) : ''}${syncWarning(c)}</span></th>`;
         acts.forEach((a, i) => {
             if (!eligible(c, a)) {
@@ -346,24 +389,113 @@ function renderWeek() {
                 html += `<td class="cell"><button class="check" ${ids} title="${title}">○</button></td>`;
                 return;
             }
+            // An activity with loot shows what the run was worth; it's edited in its own table.
+            const loot = materialsOf(a).length > 0;
             const g = goldOf(viewedWeek, c.id, a);
+            const value = g + lootValue(viewedWeek, c.id, a);
             col.done++;
-            col.gold += g;
-            const custom = g !== (a.gold || 0);
+            col.gold += value;
+            const custom = !loot && g !== (a.gold || 0);
             html += `<td class="cell done"><button class="check" ${ids} title="${title}">✔</button>`
-                + `<button class="gold-edit${custom ? ' custom' : ''}" ${ids} title="Click to change gold">${fmtShort(g)}</button></td>`;
+                + `<button class="gold-edit${custom ? ' custom' : ''}" ${ids} title="${loot ? 'Click to edit the loot' : 'Click to change gold'}">${fmtShort(value)}</button></td>`;
         });
         html += `<td class="row-total${total && done === total ? ' all-done' : ''}">${done}/${total}`
-            + `${gold ? `<span class="gold">${fmtGold(gold)}</span>` : ''}${depositButton(c, bank)}</td></tr>`;
+            + `${gold ? `<span class="gold">${fmtGold(gold)}</span>` : ''}${matsLine(mats)}${depositButton(c, bank)}</td></tr>`;
     });
 
     html += '</tbody><tfoot><tr><td></td>';
     for (const col of colTotals) {
         html += `<td class="${col.total && col.done === col.total ? 'all-done' : ''}">${col.done}/${col.total}<span class="gold">${fmtGold(col.gold)}</span></td>`;
     }
-    html += `<td>${stats.done}/${stats.total}<span class="gold">${fmtGold(stats.gold)}</span>`
+    html += `<td>${stats.done}/${stats.total}<span class="gold">${fmtGold(stats.gold)}</span>${matsLine(stats.mats)}`
         + `${stats.pending ? `<span class="to-deposit">${fmtGold(stats.pending)} to deposit</span>` : ''}</td></tr></tfoot></table>`;
-    $('#grid').innerHTML = html;
+    setGrid(`<div class="week-tables">${html}${acts.map(a => lootTable(a, chars)).join('')}</div>`);
+}
+
+// Under a gold total: the materials' value, kept apart because it isn't gold to deposit.
+function matsLine(mats) {
+    return mats ? `<span class="mats">+${fmtGold(mats)} in mats</span>` : '';
+}
+
+// Next to the grid, for an activity with materials: a row per character that can do it, with
+// the materials it dropped, its gold (vendored items) and what the run was worth at the week's
+// prices. The prices are set in the header. Filling in a run that isn't ticked yet ticks it.
+function lootTable(act, chars) {
+    const mats = materialsOf(act);
+    const rows = chars.filter(c => eligible(c, act));
+    if (!mats.length || !rows.length) return '';
+    const week = viewedWeek;
+
+    let html = `<table class="grid loot"><thead><tr><th>${esc(act.name)}</th>`;
+    for (const m of mats) {
+        const { price, from } = priceOf(week, m.id);
+        const inherited = from && from !== week;
+        const title = !from ? 'Auction House price per item: not set yet'
+            : inherited ? `Price per item, from the week of ${weekLabel(from)}. Type a new one for this week.`
+            : 'Auction House price per item this week';
+        html += `<th>${esc(m.name)}<span class="lvl">@ <input class="price-input${inherited ? ' inherited' : ''}" id="price-${act.id}-${m.id}"`
+            + ` data-mat="${m.id}" value="${from ? price : ''}" placeholder="price" title="${esc(title)}" autocomplete="off">g</span></th>`;
+    }
+    html += '<th>Gold</th><th>Value</th></tr></thead><tbody>';
+
+    let runs = 0, goldTotal = 0, valueTotal = 0;
+    const countTotals = {};
+    for (const c of rows) {
+        const done = isDone(week, c.id, act.id);
+        const counts = done ? lootOf(week, c.id, act.id) : {};
+        const ids = `data-char="${c.id}" data-act="${act.id}"`;
+        html += `<tr class="${done ? 'done' : 'idle'}"><th>${charName(c)}</th>`;
+        for (const m of mats) {
+            const n = counts[m.id] || 0;
+            countTotals[m.id] = (countTotals[m.id] || 0) + n;
+            html += `<td><input class="loot-input" id="loot-${act.id}-${c.id}-${m.id}" ${ids} data-mat="${m.id}" value="${n || ''}"`
+                + ` placeholder="0" inputmode="numeric" autocomplete="off" title="${esc(c.name)}: ${esc(m.name)}"></td>`;
+        }
+        const gold = done ? goldOf(week, c.id, act) : null;
+        const value = done ? gold + lootValue(week, c.id, act) : 0;
+        if (done) {
+            runs++;
+            goldTotal += gold;
+            valueTotal += value;
+        }
+        html += `<td><input class="loot-input" id="loot-${act.id}-${c.id}-gold" ${ids} value="${gold ?? ''}"`
+            + ` placeholder="${act.gold || 0}" autocomplete="off" title="${esc(c.name)}: gold from vendored items"></td>`
+            + `<td class="value">${done ? fmtGold(value) : '–'}</td></tr>`;
+    }
+
+    html += `</tbody><tfoot><tr><td>${runs}/${rows.length} runs</td>`;
+    for (const m of mats) {
+        const n = countTotals[m.id];
+        html += `<td>${n}<span class="gold">${fmtGold(n * priceOf(week, m.id).price)}</span></td>`;
+    }
+    return html + `<td><span class="gold">${fmtGold(goldTotal)}</span></td><td><span class="gold">${fmtGold(valueTotal)}</span></td></tr></tfoot></table>`;
+}
+
+// Swaps in the grid's new HTML. Replies come in while the loot table is being filled in, so the
+// field being typed in is put back as it was: focused, with the text typed so far.
+let swapping = false; // the old fields' focusout is not a save
+
+function setGrid(html) {
+    const active = document.activeElement;
+    const typing = active?.id && active.matches('#grid input') ? {
+        id: active.id, value: active.value, edited: active.value !== active.defaultValue,
+        start: active.selectionStart, end: active.selectionEnd,
+    } : null;
+    swapping = true;
+    try {
+        $('#grid').innerHTML = html;
+    } finally {
+        swapping = false;
+    }
+    const input = typing && document.getElementById(typing.id);
+    if (!input) return;
+    input.focus();
+    if (typing.edited) input.value = typing.value;
+    if (input.value === typing.value) {
+        input.setSelectionRange(typing.start, typing.end);
+    } else {
+        input.select(); // e.g. the default gold appeared when the run was ticked
+    }
 }
 
 // Under a character's weekly total: a button to record a deposit of the gold not yet banked, or,
@@ -393,10 +525,11 @@ function renderHistory() {
     let rows = '', allGold = 0, pastGold = 0, pastWeeks = 0, allPending = 0;
     for (let k = current; k >= oldest; k = shiftWeek(k, -1)) {
         const s = weekStats(k);
-        allGold += s.gold;
+        const earned = s.gold + s.mats;
+        allGold += earned;
         allPending += s.pending;
         if (k !== current) {
-            pastGold += s.gold;
+            pastGold += earned;
             pastWeeks++;
         }
         const pct = s.total ? Math.round((s.done / s.total) * 100) : 0;
@@ -405,7 +538,7 @@ function renderHistory() {
             <div class="when">${esc(weekLabel(k))}${k === current ? '<span class="badge-current">current</span>' : ''}</div>
             <div class="bar"><div style="width:${pct}%"></div></div>
             <div class="total">${s.done}/${s.total}</div>
-            <div class="week-gold">${fmtGold(s.gold)}${s.pending ? `<span class="to-deposit">${fmtGold(s.pending)} to deposit</span>` : ''}</div>
+            <div class="week-gold">${fmtGold(earned)}${s.mats ? `<span class="mats">incl. ${fmtGold(s.mats)} in mats</span>` : ''}${s.pending ? `<span class="to-deposit">${fmtGold(s.pending)} to deposit</span>` : ''}</div>
             <div class="chars">${chars}</div>
         </div>`;
     }
@@ -436,9 +569,11 @@ function renderManage() {
     ).join('') || '<li class="muted">No characters yet.</li>';
     renderSyncStatus();
 
-    $('#act-list').innerHTML = state.activities.map(a =>
-        listItem('activities', a, `${esc(a.name)}${reqBadge(a)}${a.gold ? ` <span class="gold-inline">~${fmtGold(a.gold)}</span>` : ''}${a.notes ? ` <span class="muted">${esc(a.notes)}</span>` : ''}`)
-    ).join('') || '<li class="muted">No activities yet.</li>';
+    $('#act-list').innerHTML = state.activities.map(a => {
+        const mats = materialsOf(a).map(m => esc(m.name)).join(', ');
+        return listItem('activities', a, `${esc(a.name)}${reqBadge(a)}${a.gold ? ` <span class="gold-inline">~${fmtGold(a.gold)}</span>` : ''}`
+            + `${mats ? ` <span class="muted">· loot: ${mats}</span>` : ''}${a.notes ? ` <span class="muted">${esc(a.notes)}</span>` : ''}`);
+    }).join('') || '<li class="muted">No activities yet.</li>';
 }
 
 // ---------- Armory sync ----------
@@ -608,7 +743,7 @@ $('#grid').addEventListener('click', e => {
     if (!btn) return;
     const { char, act } = btn.dataset;
     if (btn.classList.contains('gold-edit')) {
-        editGold(btn, char, act);
+        if (!focusLoot(char, act)) editGold(btn, char, act);
     } else {
         const done = !isDone(viewedWeek, char, act);
         const body = { week: viewedWeek, charId: char, actId: act, done };
@@ -616,12 +751,73 @@ $('#grid').addEventListener('click', e => {
         const setup = weekSetup(viewedWeek);
         if (done && !setup.live) body.gold = setup.activities.find(a => a.id === act)?.gold || 0;
         api('toggle', body).then(() => {
-            // Jump straight into the gold field so a non-default amount can just be typed.
+            // Jump straight into the gold field (or the loot) so a non-default amount can just be typed.
             const goldBtn = done && $(`#grid .gold-edit[data-char="${char}"][data-act="${act}"]`);
-            if (goldBtn) editGold(goldBtn, char, act);
+            if (goldBtn && !focusLoot(char, act)) editGold(goldBtn, char, act);
         });
     }
 });
+
+// Moves to a character's row in an activity's loot table; false when the activity has none.
+function focusLoot(charId, actId) {
+    const mat = materialsOf(weekSetup(viewedWeek).activities.find(a => a.id === actId))[0];
+    const input = mat && document.getElementById(`loot-${actId}-${charId}-${mat.id}`);
+    if (!input) return false;
+    input.focus();
+    input.select();
+    return true;
+}
+
+// Loot and price fields save when they're left, if they changed since they were rendered (a
+// re-render keeps what's being typed, see setGrid). Enter leaves the field, Escape undoes the typing.
+$('#grid').addEventListener('focusout', e => {
+    const input = e.target;
+    if (swapping || !input.matches('.loot-input, .price-input') || input.value === input.defaultValue) return;
+    if (input.matches('.price-input')) {
+        savePrice(input);
+    } else {
+        saveRun(input.closest('tr'));
+    }
+});
+
+$('#grid').addEventListener('keydown', e => {
+    if (!e.target.matches('.loot-input, .price-input')) return;
+    if (e.key === 'Escape') e.target.value = e.target.defaultValue;
+    if (e.key === 'Enter' || e.key === 'Escape') e.target.blur();
+});
+
+// Saves a row of a loot table, ticking the run if it wasn't yet. A field that isn't a number is
+// marked and nothing is saved.
+function saveRun(row) {
+    const inputs = [...row.querySelectorAll('.loot-input')];
+    const { char, act } = inputs[0].dataset;
+    const body = { week: viewedWeek, charId: char, actId: act, done: true, loot: {} };
+    let valid = true;
+    for (const input of inputs) {
+        const mat = input.dataset.mat;
+        const value = mat ? parseCount(input.value) : parseGold(input.value);
+        input.classList.toggle('invalid', Number.isNaN(value));
+        if (Number.isNaN(value)) {
+            valid = false;
+        } else if (mat) {
+            body.loot[mat] = value;
+        } else if (value !== null) {
+            body.gold = value;
+        }
+    }
+    if (!valid) return;
+    // An empty gold field means the default, as when ticking a cell; a closed week has its own.
+    const setup = weekSetup(viewedWeek);
+    if (body.gold === undefined && !setup.live) body.gold = setup.activities.find(a => a.id === act)?.gold || 0;
+    api('toggle', body);
+}
+
+// An empty price removes this week's own price, so the one from before applies again.
+function savePrice(input) {
+    const price = parsePrice(input.value);
+    input.classList.toggle('invalid', Number.isNaN(price));
+    if (!Number.isNaN(price)) api('price', { week: viewedWeek, matId: input.dataset.mat, price });
+}
 
 // Swap the gold label for an input; Enter/blur saves, Escape cancels, empty resets to the default.
 function editGold(btn, charId, actId) {
@@ -677,14 +873,15 @@ $('#view-manage').addEventListener('click', e => {
         for (const [k, v] of Object.entries(item)) {
             const field = form.elements[k];
             if (!field) continue;
+            const value = k === 'materials' ? v.map(m => m.name).join(', ') : v;
             // A select only holds values it lists, so add any other (an imported minLevel of 70,
             // a class missing from CLASSES) rather than quietly changing it on save.
-            if (field.tagName === 'SELECT' && ![...field.options].some(o => o.value === String(v))) {
-                const option = new Option(v, v);
+            if (field.tagName === 'SELECT' && ![...field.options].some(o => o.value === String(value))) {
+                const option = new Option(value, value);
                 option.dataset.extra = '';
                 field.add(option);
             }
-            field.value = v;
+            field.value = value;
         }
         form.querySelector('[type=submit]').textContent = 'Save';
         form.querySelector('.cancel').hidden = false;
@@ -702,7 +899,7 @@ setInterval(() => {
         if (viewedWeek === lastCurrent) viewedWeek = now;
         lastCurrent = now;
         requestRender();
-    } else if (!pointerDown && !document.activeElement?.matches('.gold-input')) {
+    } else if (!pointerDown && !document.activeElement?.matches('#grid input')) {
         renderWeek();
     }
     renderSyncStatus();

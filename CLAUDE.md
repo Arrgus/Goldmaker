@@ -15,7 +15,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
   - `php tests/api.test.php` runs end-to-end tests of `api.php`. It starts `php -S` from a temp copy of the site with a fresh data folder, so it never touches real data, `config.local.php` or Battle.net. Needs PHP 8.1+ with curl.
   - `node tests/client.test.js` runs `app.js` against a stub DOM and a simulated server. It checks the request queue, the sync, logging out and error handling. Needs Node 18+.
   - Syntax only: `php -l api.php` and `node --check app.js`. There's no linter or bundler.
-  - **Not covered:** the real armory sync, Apache (the `.htaccess` rules and headers) and real browser behaviour (form validation, `<select>` values, layout). Check those by hand, for example with the Docker command under Deployment.
+  - **Not covered:** the real armory sync, Apache (the `.htaccess` rules and headers) and real browser behaviour (form validation, `<select>` values, layout, and keeping the loot table's focus across re-renders). Check those by hand, for example with the Docker command under Deployment.
 - **Running it locally:**
   - Docker is closest to the server.
   - `php -S` also works, but it ignores `.htaccess`, so the data-folder block and the security headers don't apply.
@@ -37,7 +37,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 
 ## Architecture
 
-**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `import`, `sync`).
+**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `import`, `sync`).
 - **Auth runs before the data file is opened.**
   - There is a single shared password. The `goldmaker_session` cookie holds `expiry.hmac`, keyed by that password, so there is no server-side session storage and changing the password signs everyone out. The cookie is renewed once it's more than halfway to expiry.
   - Every action except `state` must be a POST with a JSON content type (the CSRF defence, together with the SameSite=Lax cookie).
@@ -83,11 +83,14 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 
 ```
 characters: [{id, name, realm, class, level, syncError?}]  // order = display order ("move" swaps neighbours)
-activities: [{id, name, minLevel, notes, gold}]  // gold = default reward; older entries may lack it
+activities: [{id, name, minLevel, notes, gold, materials}]  // gold = default reward; older entries may lack gold/materials
+                                                            // materials: [{id: "m…", name}], see Loot below
 completions: { "<weekKey>": { "<charId>": { "<actId>": gold|null } } }
 snapshots: { "<weekKey>": {characters, activities} }  // setup of closed weeks, see below
 deposits: { "<weekKey>": { "<charId>": [{gold, time}] } }  // gold taken to the bank, see below
 depositsFrom: weekKey|null  // weeks before it count as banked
+loot: { "<weekKey>": { "<charId>": { "<actId>": { "<matId>": count } } } }  // materials a run dropped
+prices: { "<weekKey>": { "<matId>": gold } }  // AH price per item, see Loot below
 lastWeek?: weekKey  // latest week a request came from
 lastSync?: unix time, lastSyncError?: string|null
 ```
@@ -105,6 +108,14 @@ lastSync?: unix time, lastSyncError?: string|null
   - Deposits are stored as given; they aren't kept to the hundred. Unticking a cell never removes a deposit, so a character can show more deposited than earned, which counts as fully banked.
   - `depositsFrom` stops weeks from before the feature existing from showing up as unbanked. A file without it starts tracking at its `lastWeek` (null when it has none, meaning every week is tracked); `api.php` fills it in on load and stores it with the next save. The import does the same.
   - Deposits are validated on every load and on import, like completions.
+- **Loot** (built for Naxxramas, which drops Wartorn Scrap and Frozen Runes). An activity can list materials sold on the Auction House, typed as comma-separated names in its Manage form.
+  - **Ids:** `saveActivity` keeps the `m…` id of a name the activity already had (case-insensitive), so renaming a material starts it afresh.
+  - **Week page:** each such activity gets its own table next to the grid. It has a row per eligible character, with a count per material, the gold (vendored items, the cell's ordinary completion gold) and the run's value. Its grid cell shows that value, and clicking it jumps to the row.
+  - **Saving:** a row is saved as a `toggle` with a `loot` field of counts (zeros dropped). Filling in a run that isn't ticked ticks it. A plain tick leaves the loot alone, and unticking removes it.
+  - **Prices** are set in the table header per week (`price`, `null` removes the week's own one). A price holds until a later week sets another, and weeks before the first price use it (`priceOf`). Prices are whole gold, not kept to the hundred, and `parsePrice` reads `45` as 45g, unlike `parseGold`.
+  - **Not deposited:** the mats are sold from one character, so their value counts as earned (row totals show it as "+… in mats", and History includes it) but never as gold to deposit.
+  - **Typing while replies arrive:** fields save on `focusout` when they differ from what was rendered (`defaultValue`). `setGrid` puts the focused field back after a re-render, keeping what was typed.
+  - Validated on every load and on import, like completions.
 - **Deleting** a character or activity keeps its completion history, and it still shows in the weeks whose snapshot has it. Elsewhere entries with unknown IDs are ignored when rendering.
 - **Realms** are stored as typed by the user, in the in-game style without spaces (e.g. `ColinasPardas`); they are not Blizzard API slugs. The characters are on EU realms.
 

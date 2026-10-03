@@ -27,7 +27,7 @@ function emptyState(): array
     // No depositsFrom: a missing one is filled in from lastWeek (see depositsFrom).
     return [
         'characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass(),
-        'deposits' => new stdClass(),
+        'deposits' => new stdClass(), 'loot' => new stdClass(), 'prices' => new stdClass(),
     ];
 }
 
@@ -120,7 +120,126 @@ function activityFields(array $in): array
         'minLevel' => clampLevel($in['minLevel'] ?? null, 80),
         'notes' => text($in['notes'] ?? ''),
         'gold' => goldAmount(text($in['gold'] ?? 0)),
+        'materials' => materialList($in['materials'] ?? []),
     ];
+}
+
+// ---------- Loot ----------
+// An activity can list materials it drops that are sold on the Auction House (Naxxramas drops
+// Wartorn Scrap and Frozen Runes). Each run records how many dropped, and each week has a price
+// per material; app.js works out what they were worth (priceOf, lootValue).
+
+function materialList(mixed $materials): array
+{
+    if (!is_array($materials) || !array_is_list($materials)) {
+        fail('Bad materials');
+    }
+    $result = [];
+    foreach ($materials as $material) {
+        $id = is_array($material) ? ($material['id'] ?? null) : null;
+        $name = is_array($material) ? text($material['name'] ?? '') : '';
+        if (!isId($id, 'm') || $name === '' || in_array($id, array_column($result, 'id'), true)) {
+            fail('Bad or duplicate material');
+        }
+        $result[] = ['id' => $id, 'name' => $name];
+    }
+    return $result;
+}
+
+// The activity form sends materials as comma-separated names. A name the activity already had
+// keeps its id, so the counts and prices recorded for it stay attached; a renamed one starts afresh.
+function materialsFromNames(mixed $names, array $existing): array
+{
+    $ids = [];
+    foreach ($existing as $material) {
+        $ids[strtolower($material['name'])] = $material['id'];
+    }
+    $result = [];
+    foreach (explode(',', text($names)) as $name) {
+        $name = trim($name);
+        $key = strtolower($name);
+        if ($name !== '' && !isset($result[$key])) {
+            $result[$key] = ['id' => $ids[$key] ?? newId('m'), 'name' => $name];
+        }
+    }
+    return array_values($result);
+}
+
+// What one run dropped: matId => count. Zero counts are left out.
+function lootCounts(mixed $counts): array
+{
+    if (!is_array($counts)) {
+        fail('Bad loot');
+    }
+    $result = [];
+    foreach ($counts as $matId => $count) {
+        if (!isId($matId, 'm') || !is_int($count) || $count < 0) {
+            fail("Bad loot count for \"$matId\"");
+        }
+        if ($count > 0) {
+            $result[$matId] = $count;
+        }
+    }
+    return $result;
+}
+
+// week => charId => actId => counts, validated like completions.
+function normalizeLoot(mixed $loot): array
+{
+    $result = [];
+    foreach ((array) $loot as $week => $chars) {
+        if (!isWeekKey($week)) {
+            fail("Bad week \"$week\" in loot");
+        }
+        foreach ((array) $chars as $charId => $runs) {
+            if (!isId($charId, 'c')) {
+                fail("Bad character id \"$charId\" in loot");
+            }
+            foreach ((array) $runs as $actId => $counts) {
+                if (!isId($actId, 'a')) {
+                    fail("Bad activity id \"$actId\" in loot");
+                }
+                if ($counts = lootCounts($counts)) {
+                    $result[$week][$charId][$actId] = $counts;
+                }
+            }
+        }
+    }
+    return $result;
+}
+
+// week => matId => gold per unit. A price holds until a later week sets another (priceOf in app.js).
+function normalizePrices(mixed $prices): array
+{
+    $result = [];
+    foreach ((array) $prices as $week => $materials) {
+        if (!isWeekKey($week)) {
+            fail("Bad week \"$week\" in prices");
+        }
+        foreach ((array) $materials as $matId => $price) {
+            if (!isId($matId, 'm') || !is_int($price) || $price < 0) {
+                fail("Bad price for \"$matId\" in week $week");
+            }
+            $result[$week][$matId] = $price;
+        }
+    }
+    return $result;
+}
+
+// Removes $map[key1][key2]…, then any of its parents left empty.
+function unsetPath(array &$map, array $keys): void
+{
+    $key = array_shift($keys);
+    if (!isset($map[$key])) {
+        return;
+    }
+    if ($keys) {
+        unsetPath($map[$key], $keys);
+        if ($map[$key]) {
+            return;
+        }
+    }
+    unset($map[$key]);
 }
 
 // Completions are stored as week => charId => [actId => gold]. Older data used a plain
@@ -300,6 +419,8 @@ function loadState(): array
     $state['completions'] = normalizeCompletions($state['completions']);
     $state['snapshots'] = normalizeSnapshots($state['snapshots']);
     $state['deposits'] = normalizeDeposits($state['deposits']);
+    $state['loot'] = normalizeLoot($state['loot']);
+    $state['prices'] = normalizePrices($state['prices']);
     if (isset($state['lastWeek']) && !isWeekKey($state['lastWeek'])) {
         fail('Bad lastWeek "' . text($state['lastWeek']) . '" in the data file', 500);
     }
@@ -480,9 +601,10 @@ switch ($action) {
         break;
 
     case 'saveActivity':
-        $act = activityFields($in);
-        if (!empty($in['id'])) {
-            $i = findIndex($state['activities'], $in['id']);
+        $i = empty($in['id']) ? null : findIndex($state['activities'], $in['id']);
+        $materials = materialsFromNames($in['materials'] ?? '', $i === null ? [] : $state['activities'][$i]['materials'] ?? []);
+        $act = activityFields(['materials' => $materials] + $in);
+        if ($i !== null) {
             $state['activities'][$i] = ['id' => $in['id']] + $act;
         } else {
             $state['activities'][] = ['id' => newId('a')] + $act;
@@ -528,8 +650,18 @@ switch ($action) {
                 $gold = (int) ($act['gold'] ?? 0);
             }
             $entries[$actId] = $gold;
+            // The loot table sends what the run dropped; a plain tick leaves it as it was.
+            if (array_key_exists('loot', $in)) {
+                $counts = lootCounts($in['loot']);
+                if ($counts) {
+                    $state['loot'][$week][$charId][$actId] = $counts;
+                } else {
+                    unsetPath($state['loot'], [$week, $charId, $actId]);
+                }
+            }
         } else {
             unset($entries[$actId]);
+            unsetPath($state['loot'], [$week, $charId, $actId]);
         }
         if ($entries) {
             $state['completions'][$week][$charId] = $entries;
@@ -568,6 +700,22 @@ switch ($action) {
         }
         break;
 
+    case 'price':
+        // Sets a material's price for a week, or with a null price removes it, so the week goes
+        // back to the price before it.
+        $week = $in['week'] ?? null;
+        $matId = $in['matId'] ?? null;
+        $price = $in['price'] ?? null;
+        if (!isWeekKey($week) || !isId($matId, 'm') || ($price !== null && (!is_numeric($price) || $price < 0))) {
+            fail('Bad price');
+        }
+        if ($price === null) {
+            unsetPath($state['prices'], [$week, $matId]);
+        } else {
+            $state['prices'][$week][$matId] = (int) round((float) $price);
+        }
+        break;
+
     case 'import':
         // Replaces everything with an uploaded goldmaker.json. The old file is kept as a backup
         // next to it; lastSync is dropped so the page re-syncs levels from the armory.
@@ -582,6 +730,8 @@ switch ($action) {
             'snapshots' => normalizeSnapshots($data['snapshots'] ?? []),
             'deposits' => normalizeDeposits($data['deposits'] ?? []),
             'depositsFrom' => depositsFrom($data),
+            'loot' => normalizeLoot($data['loot'] ?? []),
+            'prices' => normalizePrices($data['prices'] ?? []),
         ];
         if (isWeekKey($data['lastWeek'] ?? null)) {
             // The next request closes the file's last week with the imported setup.
@@ -628,6 +778,8 @@ fclose($lock);
 $state['completions'] = (object) $state['completions'];
 $state['snapshots'] = (object) $state['snapshots'];
 $state['deposits'] = (object) $state['deposits'];
+$state['loot'] = (object) $state['loot'];
+$state['prices'] = (object) $state['prices'];
 $state['armoryEnabled'] = armoryConfigured();
 $state['autoSyncInterval'] = AUTO_SYNC_INTERVAL;
 echo json_encode($state);

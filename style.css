@@ -115,6 +115,22 @@ td.cell button.gold-edit.custom { color: var(--gold); font-weight: 600; }
 .grid .row-total button.deposit.banked { border-color: transparent; background: none; color: var(--done); }
 .grid .row-total button.deposit.banked:hover { border-color: var(--border); }
 
+.mats { display: block; color: var(--gold); opacity: .7; font-size: 12px; }
+.history-row .mats { white-space: nowrap; }
+
+/* Loot tables, next to the grid (below it on narrow screens). */
+.week-tables { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 20px; }
+.grid.loot thead th { min-width: 0; }
+.grid.loot td { padding: 4px 6px; text-align: center; }
+.grid.loot tr.idle th { opacity: .55; }
+.grid.loot td.value { color: var(--gold); text-align: right; white-space: nowrap; }
+.loot-input, .price-input { width: 64px; padding: 3px 6px; text-align: right; }
+.price-input { margin: 2px 2px 0; font-size: 12px; }
+.price-input.inherited { color: var(--muted); font-style: italic; }
+.loot-input::placeholder, .price-input::placeholder { color: var(--border); }
+.loot tr.done .loot-input { border-color: rgba(63, 174, 98, .5); }
+input.invalid { border-color: var(--danger); }
+
 td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgba(255,255,255,.03) 6px 12px); color: var(--muted); font-size: 12px; }
 
 .empty { padding: 24px; background: var(--panel); border-radius: 8px; color: var(--muted); }
@@ -147,7 +163,7 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .panel form { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .panel form input[name=name] { flex: 1 1 140px; }
-.panel form input[name=notes] { flex: 1 1 100%; }
+.panel form input[name=notes], .panel form input[name=materials] { flex: 1 1 100%; }
 .panel form input[name=level] { width: 70px; }
 .panel form input[name=gold] { width: 90px; }
 .sync { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }

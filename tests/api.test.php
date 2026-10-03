@@ -294,6 +294,71 @@ unset($fresh['depositsFrom'], $fresh['lastWeek']);
 [, $state] = call('import', ['data' => $fresh]);
 check('a file without lastWeek tracks deposits from the start', $state['depositsFrom'] === null, $state['depositsFrom'] ?? 'missing');
 
+// ---------- Loot ----------
+
+$naxxFields = ['name' => 'Naxxramas', 'minLevel' => '1', 'gold' => '300'];
+[, $state] = call('saveActivity', $naxxFields + ['materials' => 'Wartorn Scrap, Frozen Rune, wartorn scrap, ']);
+$naxx = end($state['activities']);
+check('materials get m… ids, without repeats', array_column($naxx['materials'], 'name') === ['Wartorn Scrap', 'Frozen Rune']
+    && count(preg_grep('/^m[0-9a-f]+$/', array_column($naxx['materials'], 'id'))) === 2, $naxx['materials']);
+[$scrap, $rune] = array_column($naxx['materials'], 'id');
+[, $state] = call('saveActivity', $naxxFields + ['id' => $naxx['id'], 'materials' => 'frozen rune, Wartorn Scrap, Gem']);
+$mats = end($state['activities'])['materials'];
+check('editing keeps the ids of the materials still listed', $mats[0]['id'] === $rune && $mats[1]['id'] === $scrap
+    && !in_array($mats[2]['id'], [$scrap, $rune], true) && $mats[0]['name'] === 'frozen rune', $mats);
+
+$run = fn(array $extra) => call('toggle', $extra + ['week' => $week, 'charId' => $char['id'], 'actId' => $naxx['id'], 'done' => true]);
+$lootIn = fn(array $state) => $state['loot'][$week][$char['id']][$naxx['id']] ?? null;
+[, $state] = $run(['loot' => [$scrap => 12, $rune => 0]]);
+check('a run keeps its loot, without zero counts', $lootIn($state) === [$scrap => 12], $state['loot']);
+check("a run without gold gets the activity's default", $state['completions'][$week][$char['id']][$naxx['id']] === 300, $state['completions']);
+[, $state] = $run(['gold' => 500]);
+check('ticking again without loot leaves the loot alone', $lootIn($state) === [$scrap => 12], $state['loot']);
+[, $state] = $run(['loot' => []]);
+check('an empty loot is removed', $state['loot'] === [], $state['loot']);
+$run(['loot' => [$scrap => 3]]);
+[, $state] = $run(['done' => false]);
+check('unticking a run removes its loot', $state['loot'] === [], $state['loot']);
+foreach ([[$scrap => -1], [$scrap => 1.5], [$scrap => '3'], ['m12G' => 1], 'x'] as $bad) {
+    [$status] = $run(['loot' => $bad]);
+    check('the loot ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+
+$price = fn(array $extra) => call('price', $extra + ['week' => $week, 'matId' => $scrap]);
+[, $state] = $price(['price' => 450]);
+check('a price is kept per week', $state['prices'] === [$week => [$scrap => 450]], $state['prices']);
+[, $state] = $price(['price' => '1200.4']);
+check('prices are whole gold', ($state['prices'][$week][$scrap] ?? null) === 1200, $state['prices']);
+[, $state] = $price(['price' => null]);
+check('a null price removes the week\'s price', $state['prices'] === [], $state['prices']);
+foreach ([['price' => -1], ['price' => 'x'], ['price' => 5, 'matId' => 'a123'], ['price' => 5, 'week' => '2026-09-24']] as $bad) {
+    [$status] = $price($bad);
+    check('the price ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+
+$run(['loot' => [$scrap => 7]]);
+$price(['price' => 450]);
+$export = json_decode(file_get_contents($dataFile), true);
+[$status, $state] = call('import', ['data' => $export]);
+check('an import keeps materials, loot and prices', $status === 200 && $lootIn($state) === [$scrap => 7]
+    && $state['prices'] === [$week => [$scrap => 450]] && end($state['activities'])['materials'] === $mats, $status);
+$before = file_get_contents($dataFile);
+$badLoot = $export;
+$badLoot['loot'][$week][$char['id']][$naxx['id']] = [$scrap => -2];
+$badPrice = $export;
+$badPrice['prices'][$week][$scrap] = 'cheap';
+$badMaterial = $export;
+$badMaterial['activities'][array_key_last($export['activities'])]['materials'][0]['id'] = 'mXYZ';
+foreach (['bad loot' => $badLoot, 'a bad price' => $badPrice, 'a bad material id' => $badMaterial] as $what => $data) {
+    [$status] = call('import', ['data' => $data]);
+    check("an import with $what is refused", $status === 400 && file_get_contents($dataFile) === $before, $status);
+}
+
+call('state&week=2026-09-23');
+[, $state] = call('state&week=2026-09-30');
+$closed = array_column($state['snapshots']['2026-09-23']['activities'] ?? [], 'materials', 'id')[$naxx['id']] ?? null;
+check('a closed week keeps its materials', $closed === $mats, $state['snapshots']);
+
 // ---------- Signing out ----------
 
 call('logout', []);
