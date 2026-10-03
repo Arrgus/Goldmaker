@@ -165,8 +165,9 @@ function materialsFromNames(mixed $names, array $existing): array
     return array_values($result);
 }
 
-// What one run dropped: matId => count. Zero counts are left out.
-function lootCounts(mixed $counts): array
+// What one run dropped: matId => count. Zero counts are left out, unless $keepZeros (a toggle
+// uses them to remove a material).
+function lootCounts(mixed $counts, bool $keepZeros = false): array
 {
     if (!is_array($counts)) {
         fail('Bad loot');
@@ -176,7 +177,7 @@ function lootCounts(mixed $counts): array
         if (!isId($matId, 'm') || !is_int($count) || $count < 0) {
             fail("Bad loot count for \"$matId\"");
         }
-        if ($count > 0) {
+        if ($count > 0 || $keepZeros) {
             $result[$matId] = $count;
         }
     }
@@ -643,16 +644,17 @@ switch ($action) {
         $entries = $state['completions'][$week][$charId] ?? [];
         if (!empty($in['done'])) {
             // Snapshot the gold so later changes to the activity's default don't rewrite history.
+            // A run that's already done keeps its gold unless new gold is sent (a loot field saved).
             if (is_numeric($in['gold'] ?? null)) {
-                $gold = goldAmount($in['gold']);
-            } else {
+                $entries[$actId] = goldAmount($in['gold']);
+            } elseif (!array_key_exists($actId, $entries)) {
                 $act = $state['activities'][findIndex($state['activities'], $actId)];
-                $gold = (int) ($act['gold'] ?? 0);
+                $entries[$actId] = (int) ($act['gold'] ?? 0);
             }
-            $entries[$actId] = $gold;
-            // The loot table sends what the run dropped; a plain tick leaves it as it was.
+            // The Week page sends the loot fields one at a time, so only the materials sent change
+            // and a count of 0 removes one. A plain tick leaves the loot as it was.
             if (array_key_exists('loot', $in)) {
-                $counts = lootCounts($in['loot']);
+                $counts = array_filter(array_replace($state['loot'][$week][$charId][$actId] ?? [], lootCounts($in['loot'], true)));
                 if ($counts) {
                     $state['loot'][$week][$charId][$actId] = $counts;
                 } else {

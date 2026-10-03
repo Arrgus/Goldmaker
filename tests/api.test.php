@@ -149,9 +149,13 @@ $cellGold = fn(array $state) => $state['completions'][$week][$char['id']][$act['
 [, $state] = $tick(['gold' => 1950]);
 check('cell gold drops anything below the hundred', $cellGold($state) === 1900, $state['completions']);
 [, $state] = $tick();
-check("ticking without gold snapshots the activity's default", $cellGold($state) === 1200, $state['completions']);
-[, $state] = call('toggle', ['week' => $week, 'charId' => $char['id'], 'actId' => $act['id'], 'done' => false]);
+check('ticking a done cell again without gold keeps its gold', $cellGold($state) === 1900, $state['completions']);
+$untick = fn() => call('toggle', ['week' => $week, 'charId' => $char['id'], 'actId' => $act['id'], 'done' => false]);
+[, $state] = $untick();
 check('unticking removes the entry', $state['completions'] === [], $state['completions']);
+[, $state] = $tick();
+check("ticking without gold snapshots the activity's default", $cellGold($state) === 1200, $state['completions']);
+$untick();
 
 $tooLate = (new DateTimeImmutable('first wednesday of january ' . ((int) date('Y') + 2)))->format('Y-m-d');
 foreach (['0050-01-01', '2026-99-99', '2026-09-24', '2003-12-31', $tooLate, 20260923] as $badWeek) {
@@ -314,8 +318,13 @@ check('a run keeps its loot, without zero counts', $lootIn($state) === [$scrap =
 check("a run without gold gets the activity's default", $state['completions'][$week][$char['id']][$naxx['id']] === 300, $state['completions']);
 [, $state] = $run(['gold' => 500]);
 check('ticking again without loot leaves the loot alone', $lootIn($state) === [$scrap => 12], $state['loot']);
-[, $state] = $run(['loot' => []]);
-check('an empty loot is removed', $state['loot'] === [], $state['loot']);
+[, $state] = $run(['loot' => [$rune => 2]]);
+check('only the materials sent change', $lootIn($state) === [$scrap => 12, $rune => 2], $state['loot']);
+check('a done run keeps its gold when no gold is sent', $state['completions'][$week][$char['id']][$naxx['id']] === 500, $state['completions']);
+[, $state] = $run(['loot' => [$scrap => 0]]);
+check('a count of 0 removes a material', $lootIn($state) === [$rune => 2], $state['loot']);
+[, $state] = $run(['loot' => [$rune => 0]]);
+check('a run with no loot left has none', $state['loot'] === [], $state['loot']);
 $run(['loot' => [$scrap => 3]]);
 [, $state] = $run(['done' => false]);
 check('unticking a run removes its loot', $state['loot'] === [], $state['loot']);

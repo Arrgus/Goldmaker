@@ -84,11 +84,13 @@ async function fetchStub(url, options) {
 // ---------- Load app.js ----------
 
 const alerts = [];
+const confirms = [];
+let confirmAnswer = true;
 const context = vm.createContext({
     document, console, Response,
     fetch: fetchStub,
     alert: message => alerts.push(String(message)),
-    confirm: () => true,
+    confirm: message => { confirms.push(String(message)); return confirmAnswer; },
     setTimeout, clearTimeout, setInterval: () => 0,
 });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8'), context);
@@ -230,33 +232,52 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
 
     app(`viewedWeek = '2026-09-30'; renderWeek()`);
     const grid = elements['#grid'].innerHTML;
-    check('the grid cell shows the whole run', /data-act="a1" title="Click to edit the loot">800</.test(grid));
-    check('the loot table shows the counts', /id="loot-a1-c1-m1"[^>]*value="10"/.test(grid) && /id="loot-a1-c1-gold"[^>]*value="300"/.test(grid));
+    check('the run cell shows the whole run', /class="gold-edit" data-char="c1" data-act="a1" title="[^"]*">800</.test(grid));
+    check('the loot fields show the counts', /id="loot-a1-c1-m1"[^>]*value="10"/.test(grid) && /id="loot-a1-c1-gold"[^>]*value="300"/.test(grid));
     check('a carried-over price is marked', /class="price-input inherited" id="price-a1-m1"[^>]*value="50"/.test(grid)
         && /class="price-input" id="price-a1-m2"[^>]*value="1500"/.test(grid));
-    check('the row total keeps the mats apart', grid.includes('<span class="gold">300g</span><span class="mats">+500g in mats</span>'));
+    check('the row total keeps the mats apart', grid.includes('<td class="row-gold">300g<span class="mats">+500g in mats</span></td>'));
+    check('the week summary counts the mats as earned', elements['#week-summary'].innerHTML.includes('<b>800g</b>'), elements['#week-summary'].innerHTML);
+
+    // Unticking a run removes its loot, so it asks first.
+    log.length = 0;
+    confirmAnswer = false;
+    const runButton = { dataset: { char: 'c1', act: 'a1' }, classList: { contains: () => false } };
+    elements['#grid'].fire('click', { target: { closest: sel => sel === 'button[data-char]' ? runButton : null } });
+    await sleep(20);
+    confirmAnswer = true;
+    check('unticking a run with loot asks first', /Untick Naxx for Alt\?[\s\S]*10 Scrap/.test(confirms.at(-1)) && !log.some(e => e.action === 'toggle'),
+        JSON.stringify(confirms));
 
     check('prices read small numbers as gold', app('parsePrice("45")') === 45 && app('parsePrice("1.2k")') === 1200
         && app('parsePrice("1,250g")') === 1250 && app('parsePrice(" ")') === null && Number.isNaN(app('parsePrice("x")')));
     check('gold still reads small numbers as thousands', app('parseGold("19")') === 19000);
     check('counts are whole numbers', app('parseCount("")') === 0 && app('parseCount(" 12 ")') === 12 && Number.isNaN(app('parseCount("1.5")')));
 
-    // Saving a row of the loot table ticks the run with its counts; an empty gold field means the default.
+    // A loot field is saved on its own, as a tick: another field of the row may still show an older
+    // reply. An empty gold field means the default.
     await reset();
     const field = (value, dataset) => ({ value, dataset, classList: { toggle(name, on) { this[name] = on; } } });
-    const row = (...fields) => ({ querySelectorAll: () => fields });
-    context.goodRow = row(field('12', { char: 'c1', act: 'a1', mat: 'm1' }), field('', { char: 'c1', act: 'a1', mat: 'm2' }), field('', { char: 'c1', act: 'a1' }));
-    app('viewedWeek = currentWeekKey(); saveRun(goodRow)');
-    await sleep(20);
-    const sent = log.find(e => e.action === 'toggle')?.body;
-    check('a loot row is saved as a tick with its counts', JSON.stringify(sent)
-        === JSON.stringify({ week: app('currentWeekKey()'), charId: 'c1', actId: 'a1', done: true, loot: { m1: 12, m2: 0 } }), JSON.stringify(sent));
-    log.length = 0;
+    const savedField = async (value, dataset) => {
+        log.length = 0;
+        context.field = field(value, { char: 'c1', act: 'a1', ...dataset });
+        app('viewedWeek = currentWeekKey(); saveLoot(field)');
+        await sleep(20);
+        return log.find(e => e.action === 'toggle')?.body;
+    };
+    const week = app('currentWeekKey()');
+    let sent = await savedField('12', { mat: 'm1' });
+    check('a count is saved on its own', JSON.stringify(sent)
+        === JSON.stringify({ week, charId: 'c1', actId: 'a1', done: true, loot: { m1: 12 } }), JSON.stringify(sent));
+    sent = await savedField('', {});
+    check('an emptied gold field saves the default', JSON.stringify(sent)
+        === JSON.stringify({ week, charId: 'c1', actId: 'a1', done: true, gold: 100 }), JSON.stringify(sent));
     const bad = field('a dozen', { char: 'c1', act: 'a1', mat: 'm1' });
-    context.badRow = row(bad, field('', { char: 'c1', act: 'a1' }));
-    app('saveRun(badRow)');
+    context.field = bad;
+    log.length = 0;
+    app('saveLoot(field)');
     await sleep(20);
-    check("a row with a field that isn't a number is marked, not saved", bad.classList.invalid === true && !log.some(e => e.action === 'toggle'));
+    check("a field that isn't a number is marked, not saved", bad.classList.invalid === true && !log.some(e => e.action === 'toggle'));
 
     context.saved = saved;
     app('state = saved');
