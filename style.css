@@ -153,23 +153,26 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .empty { padding: 24px; background: var(--panel); border-radius: 8px; color: var(--muted); }
 
 /* History */
+/* The rows share the list's columns (subgrid), so each column is as wide as its widest entry
+   and everything lines up like a table. */
+.history-list { display: grid; grid-template-columns: auto auto auto auto 1fr; gap: 8px 16px; }
 .history-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: subgrid;
+    grid-column: 1 / -1;
     align-items: center;
-    gap: 16px;
     padding: 10px 14px;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
-    margin-bottom: 8px;
     cursor: pointer;
 }
 .history-row:hover { border-color: var(--gold); }
-.history-row .when { flex: 0 0 auto; width: 230px; font-weight: 600; }
-.history-row .total { width: 70px; text-align: right; }
-.bar { flex: 0 0 160px; height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.history-row .when { font-weight: 600; white-space: nowrap; }
+.history-row .total { text-align: right; }
+.bar { width: 160px; height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
 .bar > div { height: 100%; background: var(--done); }
-.history-row .week-gold { width: 130px; text-align: right; color: var(--gold); }
+.history-row .week-gold { text-align: right; color: var(--gold); }
 .summary { display: flex; gap: 32px; margin-bottom: 16px; }
 .summary > div { display: flex; flex-direction: column; }
 .summary b { font-size: 20px; color: var(--gold); }

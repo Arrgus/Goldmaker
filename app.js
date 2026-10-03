@@ -224,7 +224,8 @@ function parseGold(str) {
     return parseAmount(str, true);
 }
 
-// A material's price per unit: like parseGold, but small numbers are gold ("45" = 45g).
+// A material's price per unit, or a run's vendor gold: like parseGold, but small numbers are
+// gold ("45" = 45g).
 function parsePrice(str) {
     return parseAmount(str, false);
 }
@@ -561,7 +562,8 @@ function renderHistory() {
         ${pastWeeks ? `<div><span class="muted">Average per finished week</span><b>${fmtGold(pastGold / pastWeeks)}</b></div>` : ''}
         ${allPending ? `<div><span class="muted">Not deposited yet</span><b class="to-deposit">${fmtGold(allPending)}</b></div>` : ''}
     </div>`;
-    html += rows + '<p class="muted">Past weeks use the characters, levels and activities they had at the reset.</p>';
+    html += `<div class="history-list">${rows}</div>`
+        + '<p class="muted">Past weeks use the characters, levels and activities they had at the reset.</p>';
     $('#history').innerHTML = html;
 }
 
@@ -843,7 +845,7 @@ function fieldBelow(input, step) {
 // an older reply while their own saves are on the way.
 function saveLoot(input) {
     const { char, act, mat } = input.dataset;
-    const value = mat ? parseCount(input.value) : parseGold(input.value);
+    const value = mat ? parseCount(input.value) : parsePrice(input.value);
     input.classList.toggle('invalid', Number.isNaN(value));
     if (Number.isNaN(value)) return;
     const body = { week: viewedWeek, charId: char, actId: act, done: true };

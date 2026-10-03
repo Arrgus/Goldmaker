@@ -321,6 +321,8 @@ check('ticking again without loot leaves the loot alone', $lootIn($state) === [$
 [, $state] = $run(['loot' => [$rune => 2]]);
 check('only the materials sent change', $lootIn($state) === [$scrap => 12, $rune => 2], $state['loot']);
 check('a done run keeps its gold when no gold is sent', $state['completions'][$week][$char['id']][$naxx['id']] === 500, $state['completions']);
+[, $state] = $run(['gold' => 350]);
+check('the vendor gold of an activity with loot is kept as sent', $state['completions'][$week][$char['id']][$naxx['id']] === 350, $state['completions']);
 [, $state] = $run(['loot' => [$scrap => 0]]);
 check('a count of 0 removes a material', $lootIn($state) === [$rune => 2], $state['loot']);
 [, $state] = $run(['loot' => [$rune => 0]]);

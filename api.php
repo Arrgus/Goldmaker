@@ -165,6 +165,18 @@ function materialsFromNames(mixed $names, array $existing): array
     return array_values($result);
 }
 
+// Whether an activity lists materials. Its runs' gold is then the vendor gold, a few hundred, so
+// it's kept as typed instead of to the hundred (goldAmount).
+function hasLoot(array $state, string $actId): bool
+{
+    foreach ($state['activities'] as $act) {
+        if ($act['id'] === $actId) {
+            return !empty($act['materials']);
+        }
+    }
+    return false;
+}
+
 // What one run dropped: matId => count. Zero counts are left out, unless $keepZeros (a toggle
 // uses them to remove a material).
 function lootCounts(mixed $counts, bool $keepZeros = false): array
@@ -646,7 +658,7 @@ switch ($action) {
             // Snapshot the gold so later changes to the activity's default don't rewrite history.
             // A run that's already done keeps its gold unless new gold is sent (a loot field saved).
             if (is_numeric($in['gold'] ?? null)) {
-                $entries[$actId] = goldAmount($in['gold']);
+                $entries[$actId] = hasLoot($state, $actId) ? max(0, (int) round((float) $in['gold'])) : goldAmount($in['gold']);
             } elseif (!array_key_exists($actId, $entries)) {
                 $act = $state['activities'][findIndex($state['activities'], $actId)];
                 $entries[$actId] = (int) ($act['gold'] ?? 0);

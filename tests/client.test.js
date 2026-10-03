@@ -272,6 +272,8 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     sent = await savedField('', {});
     check('an emptied gold field saves the default', JSON.stringify(sent)
         === JSON.stringify({ week, charId: 'c1', actId: 'a1', done: true, gold: 100 }), JSON.stringify(sent));
+    sent = await savedField('45', {});
+    check('vendor gold reads small numbers as gold', sent?.gold === 45, JSON.stringify(sent));
     const bad = field('a dozen', { char: 'c1', act: 'a1', mat: 'm1' });
     context.field = bad;
     log.length = 0;
