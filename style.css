@@ -22,6 +22,7 @@ body {
 
 header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 24px;
     padding: 12px 24px;
@@ -50,7 +51,12 @@ button.danger:hover { border-color: var(--danger); color: var(--danger); }
 
 nav { display: flex; gap: 6px; }
 #logout { margin-left: auto; }
-body.signed-out nav, body.signed-out #logout { display: none; }
+body.signed-out nav, body.signed-out #logout, body.signed-out #nav-total { display: none; }
+/* The grand total from the Gold page, always in view. */
+#nav-total { display: flex; align-items: center; gap: 10px; margin-left: auto; font-size: 17px; font-weight: 600; color: var(--gold); background: none; border-color: transparent; }
+#nav-total .goal-pct { font-size: 12px; font-weight: 400; color: var(--muted); }
+#nav-total:hover { border-color: var(--gold); }
+#nav-total:not([hidden]) + #logout { margin-left: 0; }
 
 .login { display: flex; flex-direction: column; gap: 10px; width: 280px; margin: 80px auto; padding: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
 .login h2 { margin: 0; }
@@ -177,6 +183,36 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .summary > div { display: flex; flex-direction: column; }
 .summary b { font-size: 20px; color: var(--gold); }
 .history-row .chars { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; }
+
+/* Gold */
+.gold-list { border-collapse: separate; border-spacing: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; }
+.gold-list th, .gold-list td { padding: 4px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.gold-list tr:last-child > * { border-bottom: none; }
+.gold-list th { text-align: left; font-weight: 500; line-height: 1.25; }
+.gold-list th .lvl { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
+.gold-list .bank-row th { color: var(--gold); font-weight: 600; }
+.gold-list .bank-row > * { border-bottom: 2px solid var(--border); }
+.count-input {
+    width: 130px;
+    padding: 3px 6px;
+    text-align: right;
+    color: var(--gold);
+    background: transparent;
+    border-color: transparent;
+    border-bottom: 1px dashed var(--border);
+    border-radius: 4px;
+}
+.count-input:hover { border-color: var(--muted); }
+.count-input:focus { outline: none; border: 1px solid var(--gold); background: var(--bg); }
+.count-input::placeholder { color: var(--border); font-style: italic; }
+
+/* Goal: a bar filling towards it, in the header and on the Gold page. */
+.goal-bar { display: inline-block; width: 120px; height: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.goal-bar > span { display: block; height: 100%; background: var(--gold); }
+.goal { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 16px; margin-bottom: 16px; }
+.goal .count-input { border: 1px solid var(--border); }
+.goal-progress { display: flex; align-items: center; gap: 10px; padding-bottom: 6px; }
+.goal-progress .goal-bar { width: 200px; }
 
 /* Manage */
 .manage { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); align-items: start; gap: 20px; }

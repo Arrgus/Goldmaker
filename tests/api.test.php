@@ -370,6 +370,55 @@ call('state&week=2026-09-23');
 $closed = array_column($state['snapshots']['2026-09-23']['activities'] ?? [], 'materials', 'id')[$naxx['id']] ?? null;
 check('a closed week keeps its materials', $closed === $mats, $state['snapshots']);
 
+// ---------- Gold on hand ----------
+
+[, $state] = call('gold', ['gold' => '1500000.4']);
+check('the bank count is whole gold, with the time it was typed in', $state['bank']['gold'] === 1500000 && is_int($state['bank']['time']), $state['bank']);
+[, $state] = $deposit(['gold' => 2000]);
+check('a deposit adds to the bank', $state['bank']['gold'] === 1502000, $state['bank']);
+[, $state] = $deposit(['undo' => true]);
+check('undoing a deposit takes it off the bank', $state['bank']['gold'] === 1500000, $state['bank']);
+[, $state] = call('gold', ['charId' => $char['id'], 'gold' => 12345]);
+check("a character's gold is kept as typed", $state['charGold'][$char['id']]['gold'] === 12345, $state['charGold']);
+foreach ([['gold' => -1], ['gold' => 'x'], ['charId' => 'a123', 'gold' => 5], ['charId' => 5, 'gold' => 5]] as $bad) {
+    [$status] = call('gold', $bad);
+    check('the gold ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+[$status] = call('gold', ['charId' => 'c0000', 'gold' => 5]);
+check('gold for an unknown character is a 404', $status === 404, $status);
+$export = json_decode(file_get_contents($dataFile), true);
+[$status, $state] = call('import', ['data' => $export]);
+check('an import keeps the gold counts', $status === 200 && $state['bank']['gold'] === 1500000
+    && $state['charGold'][$char['id']]['gold'] === 12345, $status);
+$before = file_get_contents($dataFile);
+$badGold = $export;
+$badGold['charGold'][$char['id']]['gold'] = -3;
+[$status] = call('import', ['data' => $badGold]);
+check('an import with a bad gold count is refused', $status === 400 && file_get_contents($dataFile) === $before, $status);
+[, $state] = call('gold', ['charId' => $char['id'], 'gold' => null]);
+check("null clears a character's gold", $state['charGold'] === [], $state['charGold']);
+call('gold', ['charId' => $char['id'], 'gold' => 100]);
+[, $state] = call('delete', ['type' => 'characters', 'id' => $char['id']]);
+check('deleting a character drops its gold', $state['charGold'] === [], $state['charGold']);
+[, $state] = call('gold', ['gold' => null]);
+check('null clears the bank', $state['bank'] === null, $state['bank']);
+[, $state] = call('deposit', ['week' => $week, 'charId' => $char['id'], 'gold' => 700]);
+check('a deposit with no bank count starts one', $state['bank'] === ['gold' => 700, 'time' => null], $state['bank']);
+
+[, $state] = call('state');
+check('a file without a goal has none', $state['goal'] === ['gold' => 0, 'name' => ''], $state['goal']);
+call('goal', ['gold' => '2500000']);
+[, $state] = call('goal', ['name' => '  Mount  ']);
+check('goal fields are saved one at a time', $state['goal'] === ['gold' => 2500000, 'name' => 'Mount'], $state['goal']);
+foreach ([['gold' => -1], ['gold' => 'lots']] as $bad) {
+    [$status] = call('goal', $bad);
+    check('the goal ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+[$status, $state] = call('import', ['data' => json_decode(file_get_contents($dataFile), true)]);
+check('an import keeps the goal', $status === 200 && $state['goal']['gold'] === 2500000, $status);
+[, $state] = call('goal', ['gold' => null]);
+check('an empty goal amount is no goal', $state['goal']['gold'] === 0, $state['goal']);
+
 // ---------- Signing out ----------
 
 call('logout', []);

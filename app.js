@@ -17,7 +17,7 @@ const CLASSES = {
     'Warrior': '#C69B6D',
 };
 
-let state = { characters: [], activities: [], completions: {}, deposits: {} };
+let state = { characters: [], activities: [], completions: {}, deposits: {}, bank: null, charGold: {} };
 let viewedWeek = currentWeekKey();
 
 // ---------- Weeks ----------
@@ -214,6 +214,7 @@ function fmtGold(n) {
 }
 
 function fmtShort(n) {
+    if (n >= 1e6) return `${+(n / 1e6).toFixed(2)}M`;
     return n < 1000 ? String(n) : `${+(n / 1000).toFixed(2)}k`;
 }
 
@@ -224,8 +225,8 @@ function parseGold(str) {
     return parseAmount(str, true);
 }
 
-// A material's price per unit, or a run's vendor gold: like parseGold, but small numbers are
-// gold ("45" = 45g).
+// A material's price per unit, a run's vendor gold or the gold counted on the Gold page: like
+// parseGold, but small numbers are gold ("45" = 45g), and "1.2m" is understood.
 function parsePrice(str) {
     return parseAmount(str, false);
 }
@@ -233,10 +234,10 @@ function parsePrice(str) {
 function parseAmount(str, shortMeansThousands) {
     const s = str.trim().toLowerCase().replace(/[\s,g]/g, '');
     if (s === '') return null;
-    const m = s.match(/^(\d+)(\.\d+)?(k?)$/);
+    const m = s.match(/^(\d+)(\.\d+)?([km]?)$/);
     if (!m) return NaN;
-    const thousands = m[3] || (shortMeansThousands && m[1].length <= 2);
-    return Math.round(parseFloat(m[1] + (m[2] || '')) * (thousands ? 1000 : 1));
+    const scale = m[3] === 'm' ? 1e6 : m[3] || (shortMeansThousands && m[1].length <= 2) ? 1000 : 1;
+    return Math.round(parseFloat(m[1] + (m[2] || '')) * scale);
 }
 
 // How many of a material dropped: a whole number, empty for none.
@@ -292,7 +293,7 @@ function setSignedIn(signedIn) {
     $('#login-form').hidden = signedIn;
     if (!signedIn && wasSignedIn) {
         // Don't leave the previous data sitting in the page.
-        state = { characters: [], activities: [], completions: {}, deposits: {} };
+        state = { characters: [], activities: [], completions: {}, deposits: {}, bank: null, charGold: {} };
         render();
     }
     if (!signedIn) $('#login-form').elements.password.focus();
@@ -338,6 +339,7 @@ $('#logout').addEventListener('click', () => {
 function render() {
     renderWeek();
     renderHistory();
+    renderGold();
     renderManage();
 }
 
@@ -490,14 +492,19 @@ function activityCells(c, a, col) {
 let swapping = false; // the old fields' focusout is not a save
 
 function setGrid(html) {
+    setHtml($('#grid'), html);
+}
+
+// Replaces el's HTML, keeping the field being typed in as it was (see setGrid).
+function setHtml(el, html) {
     const active = document.activeElement;
-    const typing = active?.id && active.matches('#grid input') ? {
+    const typing = active?.id && active.matches('input') && el.contains(active) ? {
         id: active.id, value: active.value, edited: active.value !== active.defaultValue,
         start: active.selectionStart, end: active.selectionEnd,
     } : null;
     swapping = true;
     try {
-        $('#grid').innerHTML = html;
+        el.innerHTML = html;
     } finally {
         swapping = false;
     }
@@ -565,6 +572,91 @@ function renderHistory() {
     html += `<div class="history-list">${rows}</div>`
         + '<p class="muted">Past weeks use the characters, levels and activities they had at the reset.</p>';
     $('#history').innerHTML = html;
+}
+
+// ---------- Gold on hand ----------
+// The gold owned: the bank plus what each character carries, both counted by hand from the game.
+// Deposits add to the bank's count between counts (the "deposit" action in api.php).
+
+function goldOnHand() {
+    const bank = state.bank?.gold || 0;
+    const chars = state.characters.reduce((sum, c) => sum + (state.charGold?.[c.id]?.gold || 0), 0);
+    return { bank, chars, total: bank + chars };
+}
+
+// Deposits recorded since the bank was last counted, which its count already includes.
+function depositedSinceCount() {
+    const since = state.bank?.time || 0;
+    let sum = 0;
+    for (const chars of Object.values(state.deposits || {})) {
+        for (const list of Object.values(chars)) {
+            for (const d of list) if (d.time > since) sum += d.gold;
+        }
+    }
+    return sum;
+}
+
+// Field values use plain comma grouping: the browser's own (e.g. "1.234.567") wouldn't parse back.
+function countField(id, count, attrs, title) {
+    const value = count ? count.gold.toLocaleString('en-US') : '';
+    return `<input class="count-input" id="${id}" ${attrs} value="${value}" placeholder="not counted"`
+        + ` inputmode="decimal" autocomplete="off" title="${esc(title)}">`;
+}
+
+// Progress towards the goal, or null when there's none.
+function goalProgress(total) {
+    const goal = state.goal?.gold || 0;
+    if (!goal) return null;
+    return { goal, pct: Math.min(100, Math.floor((total / goal) * 100)), left: Math.max(0, goal - total) };
+}
+
+function progressBar(pct) {
+    return `<span class="goal-bar"><span style="width:${pct}%"></span></span>`;
+}
+
+function renderGold() {
+    const { bank, chars, total } = goldOnHand();
+    const counted = state.bank || state.characters.some(c => state.charGold?.[c.id]);
+    const progress = goalProgress(total);
+    const goalName = state.goal?.name || 'Goal';
+    $('#nav-total').hidden = !counted && !progress;
+    $('#nav-total').innerHTML = `<span>${fmtGold(total)}</span>`
+        + (progress ? `${progressBar(progress.pct)}<span class="goal-pct">${progress.pct}% of ${fmtShort(progress.goal)}</span>` : '');
+    $('#nav-total').title = progress
+        ? `${goalName}: ${fmtGold(total)} of ${fmtGold(progress.goal)}, ${fmtGold(progress.left)} to go. Click to update.`
+        : 'All your gold: the bank plus every character. Click to update it.';
+
+    const since = depositedSinceCount();
+    const bankNote = [
+        state.bank?.time ? `counted ${ago(state.bank.time)}` : state.bank ? 'from deposits only' : '',
+        since && state.bank?.time ? `incl. ${fmtGold(since)} deposited since` : '',
+    ].filter(Boolean).join(' · ');
+    let rows = `<tr class="bank-row"><th>Bank</th>`
+        + `<td>${countField('count-bank', state.bank, '', 'Gold in the bank. Deposits on the Week page add to it.')}</td>`
+        + `<td class="muted">${bankNote}</td></tr>`;
+    for (const c of state.characters) {
+        const count = state.charGold?.[c.id];
+        rows += `<tr><th>${charName(c)}<span class="lvl">${c.level}${c.realm ? ' · ' + esc(c.realm) : ''}</span></th>`
+            + `<td>${countField(`count-${c.id}`, count, `data-char="${c.id}"`, `Gold on ${c.name}`)}</td>`
+            + `<td class="muted">${count?.time ? `updated ${ago(count.time)}` : ''}</td></tr>`;
+    }
+
+    setHtml($('#gold'), `<div class="summary">
+            <div><span class="muted">Total</span><b>${fmtGold(total)}</b></div>
+            <div><span class="muted">In the bank</span><b class="count">${fmtGold(bank)}</b></div>
+            <div><span class="muted">On characters</span><b class="count">${fmtGold(chars)}</b></div>
+        </div>
+        <div class="goal">
+            <label class="field"><span>Saving up for</span><input class="goal-input" id="goal-name" data-goal="name"
+                value="${esc(state.goal?.name || '')}" placeholder="e.g. a mount" autocomplete="off"></label>
+            <label class="field"><span>Goal</span><input class="goal-input count-input" id="goal-gold" data-goal="gold"
+                value="${progress ? progress.goal.toLocaleString('en-US') : ''}" placeholder="no goal" inputmode="decimal" autocomplete="off"></label>
+            ${progress ? `<div class="goal-progress">${progressBar(progress.pct)}<span class="muted">${progress.pct}%`
+                + (progress.left ? `, ${fmtGold(progress.left)} to go` : ', reached ✔') + '</span></div>' : ''}
+        </div>
+        <table class="gold-list">${rows}</table>
+        <p class="muted">Type in the gold as the game shows it (1,234,567, 250k or 1.2m). Enter or ↓ moves to the next field,
+            Escape undoes the typing, and an empty field means not counted.</p>`);
 }
 
 function listItem(type, item, inner) {
@@ -730,7 +822,7 @@ $('#char-form').elements.class.innerHTML = Object.keys(CLASSES)
 
 // ---------- Events ----------
 
-document.querySelectorAll('nav button').forEach(btn => btn.addEventListener('click', () => showView(btn.dataset.view)));
+document.querySelectorAll('nav button, #nav-total').forEach(btn => btn.addEventListener('click', () => showView(btn.dataset.view)));
 
 function showView(name) {
     document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === name));
@@ -899,6 +991,45 @@ function editGold(btn, charId, actId) {
     });
     input.addEventListener('blur', () => finish(true));
 }
+
+// Gold counts and the goal save when they're left, one field at a time like the loot fields.
+$('#gold').addEventListener('focusout', e => {
+    const input = e.target;
+    if (swapping || !input.matches('.count-input, .goal-input') || input.value === input.defaultValue) return;
+    if (input.dataset.goal === 'name') {
+        api('goal', { name: input.value });
+        return;
+    }
+    const gold = parsePrice(input.value);
+    input.classList.toggle('invalid', Number.isNaN(gold));
+    if (Number.isNaN(gold)) return;
+    if (input.dataset.goal) {
+        api('goal', { gold });
+    } else {
+        api('gold', { charId: input.dataset.char ?? null, gold });
+    }
+});
+
+$('#gold').addEventListener('keydown', e => {
+    const input = e.target;
+    if (!input.matches('.count-input, .goal-input')) return;
+    if (e.key === 'Escape') {
+        input.value = input.defaultValue;
+        input.blur();
+        return;
+    }
+    const up = e.key === 'ArrowUp' || (e.key === 'Enter' && e.shiftKey);
+    if (!up && e.key !== 'ArrowDown' && e.key !== 'Enter') return;
+    e.preventDefault();
+    const fields = [...$('#gold').querySelectorAll('.count-input')];
+    const next = fields[fields.indexOf(input) + (up ? -1 : 1)];
+    if (next) {
+        next.focus();
+        next.select();
+    } else if (e.key === 'Enter') {
+        input.blur();
+    }
+});
 
 $('#history').addEventListener('click', e => {
     const row = e.target.closest('.history-row');

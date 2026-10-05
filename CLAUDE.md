@@ -37,7 +37,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 
 ## Architecture
 
-**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `import`, `sync`).
+**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `gold`, `goal`, `import`, `sync`).
 - **Auth runs before the data file is opened.**
   - There is a single shared password. The `goldmaker_session` cookie holds `expiry.hmac`, keyed by that password, so there is no server-side session storage and changing the password signs everyone out. The cookie is renewed once it's more than halfway to expiry.
   - Every action except `state` must be a POST with a JSON content type (the CSRF defence, together with the SameSite=Lax cookie).
@@ -91,6 +91,9 @@ deposits: { "<weekKey>": { "<charId>": [{gold, time}] } }  // gold taken to the 
 depositsFrom: weekKey|null  // weeks before it count as banked
 loot: { "<weekKey>": { "<charId>": { "<actId>": { "<matId>": count } } } }  // materials a run dropped
 prices: { "<weekKey>": { "<matId>": gold } }  // AH price per item, see Loot below
+bank: {gold, time}|null  // gold counted in the bank, see Gold on hand below
+charGold: { "<charId>": {gold, time} }  // gold counted on each character
+goal: {gold, name}  // what's being saved up for; gold 0 = no goal
 lastWeek?: weekKey  // latest week a request came from
 lastSync?: unix time, lastSyncError?: string|null
 ```
@@ -119,6 +122,12 @@ lastSync?: unix time, lastSyncError?: string|null
   - **Not deposited:** the mats are sold from one character, so their value counts as earned (row totals show it as "+… in mats", and History includes it) but never as gold to deposit.
   - **Typing while replies arrive:** fields save on `focusout` when they differ from what was rendered (`defaultValue`). `setGrid` puts the focused field back after a re-render, keeping what was typed.
   - Validated on every load and on import, like completions.
+- **Gold on hand** (the Gold page). The bank and each character have a field for the gold the game shows, typed in by hand (`gold` action; no `charId` means the bank, `null` clears). `time` is when it was typed in.
+  - A deposit adds its gold to the bank's count and undoing it takes it off (never below 0), without changing `time`. A bank with only deposits has `time: null`. The page shows how much was deposited since the last count.
+  - The grand total (bank plus the characters that still exist) sits in the header (`#nav-total`) whenever anything is counted. Deleting a character drops its gold.
+  - Whole gold, read with `parsePrice` (which also takes `1.2m`). Field values use en-US grouping, since a locale's own (`1.234.567`) wouldn't parse back.
+  - Validated on every load and on import.
+  - **Goal:** one goal, set on the Gold page (`goal` action, each field sent on its own like the loot fields). While its gold is above 0, the header shows a progress bar towards it next to the total.
 - **Deleting** a character or activity keeps its completion history, and it still shows in the weeks whose snapshot has it. Elsewhere entries with unknown IDs are ignored when rendering.
 - **Realms** are stored as typed by the user, in the in-game style without spaces (e.g. `ColinasPardas`); they are not Blizzard API slugs. The characters are on EU realms.
 

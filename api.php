@@ -28,6 +28,7 @@ function emptyState(): array
     return [
         'characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass(),
         'deposits' => new stdClass(), 'loot' => new stdClass(), 'prices' => new stdClass(),
+        'bank' => null, 'charGold' => new stdClass(), 'goal' => ['gold' => 0, 'name' => ''],
     ];
 }
 
@@ -319,6 +320,48 @@ function depositsFrom(array $data): ?string
     return $from;
 }
 
+// ---------- Gold on hand ----------
+// The Gold page keeps a count of the gold owned: what's in the bank and what each character
+// carries, typed in by hand from the game. Deposits add to the bank (the "deposit" action), so it
+// stays roughly right between counts. Both are {gold, time}, time being when it was last typed in
+// (null for a bank that has only had deposits so far).
+
+function goldCount(mixed $count, string $what): array
+{
+    $time = $count['time'] ?? null;
+    if (!is_array($count) || !is_int($count['gold'] ?? null) || $count['gold'] < 0 || ($time !== null && !is_int($time))) {
+        fail("Bad gold count for $what");
+    }
+    return ['gold' => $count['gold'], 'time' => $time];
+}
+
+function normalizeBank(mixed $bank): ?array
+{
+    return $bank === null ? null : goldCount($bank, 'the bank');
+}
+
+function normalizeCharGold(mixed $charGold): array
+{
+    $result = [];
+    foreach ((array) $charGold as $charId => $count) {
+        if (!isId($charId, 'c')) {
+            fail("Bad character id \"$charId\" in charGold");
+        }
+        $result[$charId] = goldCount($count, "\"$charId\"");
+    }
+    return $result;
+}
+
+// The gold being saved up for, shown with a progress bar next to the total. 0 gold is no goal.
+function normalizeGoal(mixed $goal): array
+{
+    $gold = $goal['gold'] ?? 0;
+    if (!is_array($goal) || !is_int($gold) || $gold < 0) {
+        fail('Bad goal');
+    }
+    return ['gold' => $gold, 'name' => text($goal['name'] ?? '')];
+}
+
 // ---------- Closed weeks ----------
 // When a week closes, the characters (with their levels) and activities it had are kept as a
 // snapshot, so later changes don't rewrite how a past week looks. The server doesn't know when
@@ -434,6 +477,9 @@ function loadState(): array
     $state['deposits'] = normalizeDeposits($state['deposits']);
     $state['loot'] = normalizeLoot($state['loot']);
     $state['prices'] = normalizePrices($state['prices']);
+    $state['bank'] = normalizeBank($state['bank']);
+    $state['charGold'] = normalizeCharGold($state['charGold']);
+    $state['goal'] = normalizeGoal($state['goal']);
     if (isset($state['lastWeek']) && !isWeekKey($state['lastWeek'])) {
         fail('Bad lastWeek "' . text($state['lastWeek']) . '" in the data file', 500);
     }
@@ -632,6 +678,8 @@ switch ($action) {
         $i = findIndex($state[$type], $in['id'] ?? null);
         array_splice($state[$type], $i, 1);
         // Completion history is kept on purpose; entries for deleted ids are simply ignored.
+        // The gold a deleted character carried no longer counts.
+        unset($state['charGold'][$in['id']]);
         break;
 
     case 'move':
@@ -694,16 +742,21 @@ switch ($action) {
         if (!isWeekKey($week) || !isId($charId, 'c')) {
             fail('Bad deposit');
         }
+        // The bank's count goes up or down with it, keeping the time it was last typed in.
         $list = $state['deposits'][$week][$charId] ?? [];
+        $bank = $state['bank'] ?? ['gold' => 0, 'time' => null];
         if (!empty($in['undo'])) {
-            array_pop($list);
+            $gold = array_pop($list)['gold'] ?? 0;
+            $bank['gold'] = max(0, $bank['gold'] - $gold);
         } else {
             $gold = is_numeric($in['gold'] ?? null) ? (int) $in['gold'] : 0;
             if ($gold <= 0) {
                 fail('Nothing to deposit');
             }
             $list[] = ['gold' => $gold, 'time' => time()];
+            $bank['gold'] += $gold;
         }
+        $state['bank'] = $bank;
         if ($list) {
             $state['deposits'][$week][$charId] = $list;
         } else {
@@ -730,6 +783,40 @@ switch ($action) {
         }
         break;
 
+    case 'gold':
+        // Sets the gold counted in the bank (no charId) or on a character; null clears it.
+        $charId = $in['charId'] ?? null;
+        $gold = $in['gold'] ?? null;
+        if (($charId !== null && !isId($charId, 'c')) || ($gold !== null && (!is_numeric($gold) || $gold < 0))) {
+            fail('Bad gold');
+        }
+        $count = $gold === null ? null : ['gold' => (int) round((float) $gold), 'time' => time()];
+        if ($charId === null) {
+            $state['bank'] = $count;
+        } else {
+            findIndex($state['characters'], $charId);
+            if ($count === null) {
+                unset($state['charGold'][$charId]);
+            } else {
+                $state['charGold'][$charId] = $count;
+            }
+        }
+        break;
+
+    case 'goal':
+        // The Gold page sends its goal fields one at a time, so only what's sent changes.
+        if (array_key_exists('gold', $in)) {
+            $gold = $in['gold'] ?? 0;
+            if (!is_numeric($gold) || $gold < 0) {
+                fail('Bad goal');
+            }
+            $state['goal']['gold'] = (int) round((float) $gold);
+        }
+        if (array_key_exists('name', $in)) {
+            $state['goal']['name'] = text($in['name']);
+        }
+        break;
+
     case 'import':
         // Replaces everything with an uploaded goldmaker.json. The old file is kept as a backup
         // next to it; lastSync is dropped so the page re-syncs levels from the armory.
@@ -746,6 +833,9 @@ switch ($action) {
             'depositsFrom' => depositsFrom($data),
             'loot' => normalizeLoot($data['loot'] ?? []),
             'prices' => normalizePrices($data['prices'] ?? []),
+            'bank' => normalizeBank($data['bank'] ?? null),
+            'charGold' => normalizeCharGold($data['charGold'] ?? []),
+            'goal' => normalizeGoal($data['goal'] ?? []),
         ];
         if (isWeekKey($data['lastWeek'] ?? null)) {
             // The next request closes the file's last week with the imported setup.
@@ -794,6 +884,7 @@ $state['snapshots'] = (object) $state['snapshots'];
 $state['deposits'] = (object) $state['deposits'];
 $state['loot'] = (object) $state['loot'];
 $state['prices'] = (object) $state['prices'];
+$state['charGold'] = (object) $state['charGold'];
 $state['armoryEnabled'] = armoryConfigured();
 $state['autoSyncInterval'] = AUTO_SYNC_INTERVAL;
 echo json_encode($state);
