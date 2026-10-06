@@ -123,9 +123,9 @@ td.cell button.gold-edit { min-height: 0; padding: 0 4px 3px; font-size: 12px; c
 td.cell button.gold-edit:hover { color: var(--text); text-decoration: underline; }
 td.cell button.gold-edit.custom { color: var(--gold); font-weight: 600; }
 /* The gold with its 1k arrows either side, which only show on the hovered row. */
-td.cell .gold-row { display: flex; }
-td.cell .gold-row button.gold-edit { flex: 1; width: auto; }
-td.cell button.bump { width: auto; min-height: 0; padding: 0 3px 3px; font-size: 11px; visibility: hidden; }
+td.cell .gold-row { display: flex; justify-content: center; align-items: center; }
+td.cell .gold-row button.gold-edit { width: auto; }
+td.cell button.bump { width: auto; min-height: 0; padding: 0 5px 3px; font-size: 20px; font-weight: 700; line-height: 14px; visibility: hidden; }
 .grid tbody tr:hover td.cell button.bump { visibility: visible; }
 @media (hover: none) { td.cell button.bump { visibility: visible; } }
 td.cell.done button.bump:hover { color: var(--text); }

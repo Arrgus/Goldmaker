@@ -469,9 +469,9 @@ function activityCells(c, a, col) {
         col.gold += g;
         const custom = !mats.length && g !== (a.gold || 0);
         html = `<td class="cell done"><button class="check" ${ids} title="${title}">✔</button>`
-            + (mats.length ? '' : `<span class="gold-row"><button class="bump" ${ids} data-step="-1000" title="1k less">▾</button>`)
+            + (mats.length ? '' : `<span class="gold-row"><button class="bump" ${ids} data-step="-1000" title="1k less">‹</button>`)
             + `<button class="gold-edit${custom ? ' custom' : ''}" ${ids} title="${mats.length ? 'What the run was worth. Click to edit the loot' : 'Click to change gold'}">${fmtShort(value)}</button>`
-            + (mats.length ? '' : `<button class="bump" ${ids} data-step="1000" title="1k more">▴</button></span>`) + '</td>';
+            + (mats.length ? '' : `<button class="bump" ${ids} data-step="1000" title="1k more">›</button></span>`) + '</td>';
     } else {
         html = `<td class="cell"><button class="check" ${ids} title="${title}">○</button></td>`;
     }
