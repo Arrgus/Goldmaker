@@ -122,6 +122,13 @@ td.cell.done button.check { min-height: 24px; padding: 2px 0 0; line-height: 1.1
 td.cell button.gold-edit { min-height: 0; padding: 0 4px 3px; font-size: 12px; color: var(--muted); }
 td.cell button.gold-edit:hover { color: var(--text); text-decoration: underline; }
 td.cell button.gold-edit.custom { color: var(--gold); font-weight: 600; }
+/* The gold with its 1k arrows either side, which only show on the hovered row. */
+td.cell .gold-row { display: flex; }
+td.cell .gold-row button.gold-edit { flex: 1; width: auto; }
+td.cell button.bump { width: auto; min-height: 0; padding: 0 3px 3px; font-size: 11px; visibility: hidden; }
+.grid tbody tr:hover td.cell button.bump { visibility: visible; }
+@media (hover: none) { td.cell button.bump { visibility: visible; } }
+td.cell.done button.bump:hover { color: var(--text); }
 .gold-input { width: 70px; margin: 2px 4px 4px; padding: 2px 4px; font-size: 12px; text-align: center; }
 .gold { display: block; color: var(--gold); font-size: 12px; }
 .gold-inline { color: var(--gold); font-size: 13px; margin-left: 6px; }

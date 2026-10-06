@@ -136,6 +136,7 @@ lastSync?: unix time, lastSyncError?: string|null
 - **Week page layout:** the totals sit next to the week's dates (`weekSummary`). The grid ends with Done, Gold (mats on a line of their own, since they aren't deposited) and Bank (the Deposit button, left out for weeks before `depositsFrom`). Rows are kept to two lines so the 26-odd characters fit on fewer screens. The header, the footer and the character names stay in view while scrolling (sticky `thead`, `tfoot` cells and row headers), so the grid needs no scroll box of its own.
 - **Class colors:** the `CLASSES` map in `app.js` supplies the class colors and also fills the class `<select>`.
 - **Gold input** (`parseGold`) accepts `1900`, `1,900`, `1.9k` and `20k`. A number with one or two digits before the decimal point is read as thousands (`19` means 19k). An empty input means "use the default".
+- **1k arrows:** a ticked cell without loot has ▾/▴ either side of its gold (shown on the hovered row) that move it by 1k, never below 0, for things like world quests. Each click is a `toggle` with the new gold; `bumpedGold` holds the amount asked for until its reply is in, so quick clicks add up instead of each starting from the same state.
 - **Activity gold field:** it keeps `step="100"` so the arrows move by 100. Instead of letting the browser refuse a value like 1250, its `invalid` handler rounds the value down and submits again. Negative values are left for the browser's own warning.
 
 ## Open issues (from the September 2026 audit)

@@ -462,14 +462,16 @@ function activityCells(c, a, col) {
     const title = `${esc(c.name)}: ${esc(a.name)}`;
     let html;
     if (done) {
-        const g = goldOf(week, c.id, a);
+        const g = bumpedGold[`${week}.${c.id}.${a.id}`] ?? goldOf(week, c.id, a);
         const value = g + lootValue(week, c.id, a);
         col.done++;
         col.value += value;
         col.gold += g;
         const custom = !mats.length && g !== (a.gold || 0);
         html = `<td class="cell done"><button class="check" ${ids} title="${title}">✔</button>`
-            + `<button class="gold-edit${custom ? ' custom' : ''}" ${ids} title="${mats.length ? 'What the run was worth. Click to edit the loot' : 'Click to change gold'}">${fmtShort(value)}</button></td>`;
+            + (mats.length ? '' : `<span class="gold-row"><button class="bump" ${ids} data-step="-1000" title="1k less">▾</button>`)
+            + `<button class="gold-edit${custom ? ' custom' : ''}" ${ids} title="${mats.length ? 'What the run was worth. Click to edit the loot' : 'Click to change gold'}">${fmtShort(value)}</button>`
+            + (mats.length ? '' : `<button class="bump" ${ids} data-step="1000" title="1k more">▴</button></span>`) + '</td>';
     } else {
         html = `<td class="cell"><button class="check" ${ids} title="${title}">○</button></td>`;
     }
@@ -852,7 +854,9 @@ $('#grid').addEventListener('click', e => {
     const btn = e.target.closest('button[data-char]');
     if (!btn) return;
     const { char, act } = btn.dataset;
-    if (btn.classList.contains('gold-edit')) {
+    if (btn.classList.contains('bump')) {
+        bumpGold(char, act, Number(btn.dataset.step));
+    } else if (btn.classList.contains('gold-edit')) {
         if (!focusLoot(char, act)) editGold(btn, char, act);
     } else {
         const done = !isDone(viewedWeek, char, act);
@@ -868,6 +872,25 @@ $('#grid').addEventListener('click', e => {
         });
     }
 });
+
+// Gold a cell's arrows have asked for but whose reply hasn't come back yet, by "week.charId.actId".
+// Quick clicks build on it rather than on the state, which only catches up with the replies.
+const bumpedGold = {};
+
+// The arrows move a run's gold by 1k (world quests and the like), never below 0.
+function bumpGold(charId, actId, step) {
+    const key = `${viewedWeek}.${charId}.${actId}`;
+    const act = weekSetup(viewedWeek).activities.find(a => a.id === actId);
+    const gold = Math.max(0, (bumpedGold[key] ?? goldOf(viewedWeek, charId, act)) + step);
+    bumpedGold[key] = gold;
+    requestRender();
+    api('toggle', { week: viewedWeek, charId, actId, done: true, gold }).finally(() => {
+        if (bumpedGold[key] === gold) {
+            delete bumpedGold[key];
+            requestRender();
+        }
+    });
+}
 
 // Unticking a run removes its loot (api.php), so a run with loot filled in asks first.
 function confirmUntick(charId, actId) {

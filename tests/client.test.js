@@ -281,6 +281,20 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     await sleep(20);
     check("a field that isn't a number is marked, not saved", bad.classList.invalid === true && !log.some(e => e.action === 'toggle'));
 
+    // The 1k arrows: quick clicks build on each other before the replies arrive, never below 0.
+    log.length = 0;
+    server.delay.toggle = 50;
+    app(`bumpGold('c1', 'a1', 1000); bumpGold('c1', 'a1', 1000); bumpGold('c1', 'a1', -1000)`);
+    await sleep(250);
+    let golds = log.filter(e => e.event === 'send' && e.action === 'toggle').map(e => e.body.gold);
+    check('quick arrow clicks add up', JSON.stringify(golds) === '[1045,2045,1045]', JSON.stringify(golds));
+    log.length = 0;
+    app(`bumpGold('c1', 'a1', -1000); bumpGold('c1', 'a1', -1000)`);
+    await sleep(200);
+    golds = log.filter(e => e.event === 'send' && e.action === 'toggle').map(e => e.body.gold);
+    check('the arrows stop at 0', JSON.stringify(golds) === '[45,0]', JSON.stringify(golds));
+    server.delay.toggle = 0;
+
     context.saved = saved;
     app('state = saved');
 
