@@ -748,6 +748,19 @@ function renderSyncStatus() {
 
 $('#sync-btn').addEventListener('click', () => sync().catch(() => {}));
 
+// ---------- Export ----------
+
+$('#export-btn').addEventListener('click', () => {
+    if (!state) return;
+    const { armoryEnabled, autoSyncInterval, ...data } = state; // fields the API adds, never stored
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'goldmaker.json';
+    a.click();
+    URL.revokeObjectURL(url);
+});
+
 // ---------- Import ----------
 
 $('#import-btn').addEventListener('click', () => $('#import-file').click());
