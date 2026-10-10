@@ -93,7 +93,7 @@ loot: { "<weekKey>": { "<charId>": { "<actId>": { "<matId>": count } } } }  // m
 prices: { "<weekKey>": { "<matId>": gold } }  // AH price per item, see Loot below
 bank: {gold, time}|null  // gold counted in the bank, see Gold on hand below
 charGold: { "<charId>": {gold, time} }  // gold counted on each character
-goal: {gold, name}  // what's being saved up for; gold 0 = no goal
+goals: [{id: "g…", name, gold}]  // what's being saved up for; the first is the current goal
 lastWeek?: weekKey  // latest week a request came from
 lastSync?: unix time, lastSyncError?: string|null
 ```
@@ -127,17 +127,33 @@ lastSync?: unix time, lastSyncError?: string|null
   - The grand total (bank plus the characters that still exist) sits in the header (`#nav-total`) whenever anything is counted. Deleting a character drops its gold.
   - Whole gold, read with `parsePrice` (which also takes `1.2m`). Field values use en-US grouping, since a locale's own (`1.234.567`) wouldn't parse back.
   - Validated on every load and on import.
-  - **Goal:** one goal, set on the Gold page (`goal` action, each field sent on its own like the loot fields). While its gold is above 0, the header shows a progress bar towards it next to the total.
+  - **Goals:** a list on the Gold page. The first is the current goal, and the header shows a progress bar towards it next to the total. The others are later goals.
+    - **Progress of a later goal** counts only the gold beyond the current goal, and its "to go" is what the current goal and that one need together (`goalsProgress`). Each later goal is measured on its own against that excess, not one after another.
+    - **The `goal` action:** `add` appends a goal (gold must be above 0). With an `id`, `remove` deletes it, `first` makes it the current one, and otherwise the `name`/`gold` sent change, one field at a time like the loot fields. A goal can't be emptied, only removed.
+    - **Older data** had a single `goal: {gold, name}`. `normalizeGoals` turns it into the goal `g0` on every load until the next save, so its id stays stable until then (the import does the same).
 - **Deleting** a character or activity keeps its completion history, and it still shows in the weeks whose snapshot has it. Elsewhere entries with unknown IDs are ignored when rendering.
 - **Realms** are stored as typed by the user, in the in-game style without spaces (e.g. `ColinasPardas`); they are not Blizzard API slugs. The characters are on EU realms.
 
 ## Front-end conventions
 
 - **Week page layout:** the totals sit next to the week's dates (`weekSummary`). The grid ends with Done, Gold (mats on a line of their own, since they aren't deposited) and Bank (the Deposit button, left out for weeks before `depositsFrom`). Rows are kept to two lines so the 26-odd characters fit on fewer screens. The header, the footer and the character names stay in view while scrolling (sticky `thead`, `tfoot` cells and row headers), so the grid needs no scroll box of its own.
+- **Hiding Naxxramas:** a checkbox next to the week's totals hides the activities with loot (`materialsOf`) and every character left with nothing visible to do, which means those below level 80. A character who can do another activity stays. The week's totals and the footer's Done, Gold and Bank still count everything, so gold not yet deposited by a hidden character still shows. The setting is per browser (`localStorage`, `readSetting`/`writeSetting`).
+- **Sideways scrolling:** the page itself scrolls sideways when the grid is wider than the window. `body { min-width: fit-content }` grows with it, so the header can be `position: sticky; left: 0` at `100cqw` (the window minus its scrollbar, with `html` as the query container). It stays in view sideways and scrolls away downwards. The containment stops the body background reaching the canvas, so `html` has the background too.
 - **Class colors:** the `CLASSES` map in `app.js` supplies the class colors and also fills the class `<select>`.
 - **Gold input** (`parseGold`) accepts `1900`, `1,900`, `1.9k` and `20k`. A number with one or two digits before the decimal point is read as thousands (`19` means 19k). An empty input means "use the default".
 - **1k arrows:** a ticked cell without loot has ‹/› either side of its gold (shown on the hovered row) that move it by 1k, never below 0, for things like world quests. Each click is a `toggle` with the new gold; `bumpedGold` holds the amount asked for until its reply is in, so quick clicks add up instead of each starting from the same state.
 - **Activity gold field:** it keeps `step="100"` so the arrows move by 100. Instead of letting the browser refuse a value like 1250, its `invalid` handler rounds the value down and submits again. Negative values are left for the browser's own warning.
+
+## Planned: goals priced in real money (not built yet)
+
+Some goals cost real money (game time, a shop mount). Such a goal gets a euro price instead of gold, and its gold is what the WoW Tokens to cover it cost.
+
+- **Token price:** the Blizzard Game Data API's WoW Token index, `GET https://eu.api.blizzard.com/data/wow/token/index?namespace=dynamic-eu`, called with the client-credentials token already used by `armory.php` (`armoryToken()`). It returns `price` in copper (divide by 10,000 for gold) and `last_updated_timestamp`. Check the field names against a real reply first.
+  - Fetch it with the armory `sync` (before the exclusive lock, like the character lookups), store `tokenPrice: {gold, time}` in the data file, and show its age. Refresh it at least daily.
+- **Euros to tokens:** a token is redeemed for a fixed Battle.net Balance (verify the current EU amount, believed to be €13). Tokens can't be split, so a goal needs `ceil(euros / balancePerToken)` tokens, and its gold is `tokens × token price`. Keep the per-token balance in a constant or setting.
+- **500k reserve:** at least 500,000g must stay in the bank after any goal is bought. So a goal counts as reached only when the gold on hand covers its cost plus the reserve. For later goals: current cost + this goal's cost + the reserve.
+  - Open question: should the reserve apply to gold goals too, not only money-priced ones?
+- **Data:** a goal becomes `{id, name, gold}` or `{id, name, euros}`. `normalizeGoals` validates either, and `goalsProgress` works out the gold of a money goal from `tokenPrice`. Without a token price yet, show the goal as "price unknown" and leave it out of the header bar.
 
 ## Open issues (from the September 2026 audit)
 

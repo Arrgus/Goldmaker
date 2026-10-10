@@ -20,6 +20,26 @@ const CLASSES = {
 let state = { characters: [], activities: [], completions: {}, deposits: {}, bank: null, charGold: {} };
 let viewedWeek = currentWeekKey();
 
+// View settings are kept per browser: a phone may hide what a desktop shows. Storage can be
+// unavailable (private windows, blocked site data), which just means the defaults.
+function readSetting(key) {
+    try {
+        return localStorage.getItem(key);
+    } catch {
+        return null;
+    }
+}
+
+function writeSetting(key, value) {
+    try {
+        localStorage.setItem(key, value);
+    } catch {
+        // not remembered, that's all
+    }
+}
+
+let hideLoot = readSetting('goldmaker.hideLoot') === '1';
+
 // ---------- Weeks ----------
 // A week starts on Wednesday at 04:00 local time and is keyed by that Wednesday's date.
 
@@ -362,6 +382,7 @@ function renderWeek() {
     const { characters: chars, activities: acts, live } = weekSetup(viewedWeek);
     if (!chars.length || !acts.length) {
         $('#week-summary').innerHTML = '';
+        $('#loot-toggle').hidden = true;
         $('#grid').innerHTML = live
             ? '<div class="empty">Add some characters and activities under <b>Manage</b> to get started.</div>'
             : '<div class="empty">There were no characters or activities this week.</div>';
@@ -372,13 +393,28 @@ function renderWeek() {
     const bank = tracksDeposits(viewedWeek);
     $('#week-summary').innerHTML = weekSummary(stats);
 
+    // The activities with loot (Naxxramas) can be hidden, and with them the characters who can't
+    // do anything else: those below level 80. The totals still count everything.
+    const lootActs = acts.filter(a => materialsOf(a).length);
+    const shown = hideLoot ? acts.filter(a => !lootActs.includes(a)) : acts;
+    const rows = hideLoot ? stats.perChar.filter(p => shown.some(a => eligible(p.char, a))) : stats.perChar;
+    const hiddenChars = stats.perChar.length - rows.length;
+    $('#loot-toggle').hidden = !lootActs.length;
+    $('#hide-loot').checked = hideLoot;
+    $('#loot-toggle span').textContent = `Hide ${lootActs.map(a => a.name).join(', ')}`
+        + (hideLoot && hiddenChars ? ` (and ${hiddenChars} character${hiddenChars === 1 ? '' : 's'})` : '');
+    if (!shown.length || !rows.length) {
+        $('#grid').innerHTML = '<div class="empty">Everything this week is hidden.</div>';
+        return;
+    }
+
     // Characters are rows and activities are columns: there are far more characters than activities.
     // An activity with loot gets a group of columns under its name: the run, a count per material
     // and the vendor gold, so its loot is filled in on the character's own row.
-    const grouped = acts.some(a => materialsOf(a).length);
+    const grouped = shown.some(a => materialsOf(a).length);
     const span = grouped ? ' rowspan="2"' : '';
     let head = `<tr><th${span}></th>`, subhead = '';
-    for (const a of acts) {
+    for (const a of shown) {
         const mats = materialsOf(a);
         const notes = a.notes ? ` title="${esc(a.notes)}"` : '';
         const typical = a.gold ? `<span class="req">~${fmtShort(a.gold)}</span>` : '';
@@ -397,17 +433,17 @@ function renderWeek() {
         + (grouped ? `<tr>${subhead}</tr>` : '');
 
     let body = '';
-    const cols = acts.map(() => ({ done: 0, total: 0, value: 0, gold: 0, counts: {} }));
-    for (const { char: c, done, total, gold, mats, ...deposits } of stats.perChar) {
+    const cols = shown.map(() => ({ done: 0, total: 0, value: 0, gold: 0, counts: {} }));
+    for (const { char: c, done, total, gold, mats, ...deposits } of rows) {
         body += `<tr><th>${charName(c)}<span class="lvl">${c.level}${c.realm ? ' · ' + esc(c.realm) : ''}${syncWarning(c)}</span></th>`
-            + acts.map((a, i) => activityCells(c, a, cols[i])).join('')
+            + shown.map((a, i) => activityCells(c, a, cols[i])).join('')
             + `<td class="row-done${total && done === total ? ' all-done' : ''}">${done}/${total}</td>`
             + `<td class="row-gold">${gold || mats ? fmtGold(gold) + matsLine(mats) : '–'}</td>`
             + (bank ? `<td class="row-bank">${depositButton(c, deposits)}</td>` : '') + '</tr>';
     }
 
-    let foot = '<tr><td>Total</td>';
-    acts.forEach((a, i) => {
+    let foot = `<tr><td${hideLoot ? ' title="The Done, Gold and Bank totals include what\'s hidden"' : ''}>Total</td>`;
+    shown.forEach((a, i) => {
         const col = cols[i];
         foot += `<td class="${col.total && col.done === col.total ? 'all-done' : ''}">${col.done}/${col.total}<span class="gold">${fmtGold(col.value)}</span></td>`;
         const mats = materialsOf(a);
@@ -605,11 +641,22 @@ function countField(id, count, attrs, title) {
         + ` inputmode="decimal" autocomplete="off" title="${esc(title)}">`;
 }
 
-// Progress towards the goal, or null when there's none.
-function goalProgress(total) {
-    const goal = state.goal?.gold || 0;
-    if (!goal) return null;
-    return { goal, pct: Math.min(100, Math.floor((total / goal) * 100)), left: Math.max(0, goal - total) };
+// Progress towards each goal. The first is the current one; a later goal is reached with the gold
+// beyond the current one, so its bar shows how far that goes, and left is what's still needed for
+// the current goal and that one together.
+function goalsProgress(total) {
+    const [current, ...later] = state.goals || [];
+    if (!current) return [];
+    const pct = (have, need) => Math.min(100, Math.floor((have / need) * 100));
+    const beyond = Math.max(0, total - current.gold);
+    return [
+        { goal: current, pct: pct(total, current.gold), left: Math.max(0, current.gold - total) },
+        ...later.map(goal => ({ goal, pct: pct(beyond, goal.gold), left: Math.max(0, current.gold + goal.gold - total) })),
+    ];
+}
+
+function goalName(goal, i) {
+    return goal.name || (i ? 'Later goal' : 'Current goal');
 }
 
 function progressBar(pct) {
@@ -619,13 +666,14 @@ function progressBar(pct) {
 function renderGold() {
     const { bank, chars, total } = goldOnHand();
     const counted = state.bank || state.characters.some(c => state.charGold?.[c.id]);
-    const progress = goalProgress(total);
-    const goalName = state.goal?.name || 'Goal';
-    $('#nav-total').hidden = !counted && !progress;
+    const goals = goalsProgress(total);
+    const current = goals[0];
+    $('#nav-total').hidden = !counted && !current;
     $('#nav-total').innerHTML = `<span>${fmtGold(total)}</span>`
-        + (progress ? `${progressBar(progress.pct)}<span class="goal-pct">${progress.pct}% of ${fmtShort(progress.goal)}</span>` : '');
-    $('#nav-total').title = progress
-        ? `${goalName}: ${fmtGold(total)} of ${fmtGold(progress.goal)}, ${fmtGold(progress.left)} to go. Click to update.`
+        + (current ? `${progressBar(current.pct)}<span class="goal-pct">${current.pct}% of ${fmtShort(current.goal.gold)}</span>` : '');
+    $('#nav-total').title = current
+        ? `${goalName(current.goal, 0)}: ${fmtGold(total)} of ${fmtGold(current.goal.gold)}, `
+            + (current.left ? `${fmtGold(current.left)} to go` : 'reached') + '. Click to update.'
         : 'All your gold: the bank plus every character. Click to update it.';
 
     const since = depositedSinceCount();
@@ -648,17 +696,37 @@ function renderGold() {
             <div><span class="muted">In the bank</span><b class="count">${fmtGold(bank)}</b></div>
             <div><span class="muted">On characters</span><b class="count">${fmtGold(chars)}</b></div>
         </div>
-        <div class="goal">
-            <label class="field"><span>Saving up for</span><input class="goal-input" id="goal-name" data-goal="name"
-                value="${esc(state.goal?.name || '')}" placeholder="e.g. a mount" autocomplete="off"></label>
-            <label class="field"><span>Goal</span><input class="goal-input count-input" id="goal-gold" data-goal="gold"
-                value="${progress ? progress.goal.toLocaleString('en-US') : ''}" placeholder="no goal" inputmode="decimal" autocomplete="off"></label>
-            ${progress ? `<div class="goal-progress">${progressBar(progress.pct)}<span class="muted">${progress.pct}%`
-                + (progress.left ? `, ${fmtGold(progress.left)} to go` : ', reached ✔') + '</span></div>' : ''}
-        </div>
+        <table class="goal-list">${goals.map(goalRow).join('')}${newGoalRow(goals.length)}</table>
         <table class="gold-list">${rows}</table>
         <p class="muted">Type in the gold as the game shows it (1,234,567, 250k or 1.2m). Enter or ↓ moves to the next field,
             Escape undoes the typing, and an empty field means not counted.</p>`);
+}
+
+// A goal's row: its name and gold, which save when they're left, and its progress.
+function goalRow({ goal, pct, left }, i) {
+    const ids = `data-id="${goal.id}"`;
+    const current = esc(goalName(state.goals[0], 0));
+    const note = !i ? (left ? `${fmtGold(left)} to go` : 'reached ✔')
+        : left ? `${fmtGold(left)} to go for this and ${current}` : `reached, together with ${current} ✔`;
+    const title = i ? ` title="The gold beyond ${current} (${fmtGold(state.goals[0].gold)}) goes towards this goal."` : '';
+    return `<tr${i ? '' : ' class="current"'}><th>${i ? 'Later' : 'Current'}</th>`
+        + `<td><input class="goal-input" id="goal-name-${goal.id}" ${ids} data-field="name" value="${esc(goal.name)}"`
+        + ` placeholder="${goalName({}, i)}" autocomplete="off"></td>`
+        + `<td><input class="goal-input count-input" id="goal-gold-${goal.id}" ${ids} data-field="gold"`
+        + ` value="${goal.gold.toLocaleString('en-US')}" inputmode="decimal" autocomplete="off"></td>`
+        + `<td${title}><div class="goal-progress">${progressBar(pct)}<span class="muted">${pct}%, ${note}</span></div></td>`
+        + `<td class="goal-buttons">${i ? `<button data-goal-first="${goal.id}" title="Save up for this one now">Make current</button>` : ''}`
+        + `<button class="danger" data-goal-remove="${goal.id}" title="Remove this goal">Remove</button></td></tr>`;
+}
+
+// The fields for a new goal. It goes at the end of the list, so the first goal added is the current one.
+function newGoalRow(count) {
+    return `<tr class="new-goal"><th>${count ? 'Add' : 'Goal'}</th>`
+        + `<td><input class="goal-input new-goal" id="goal-new-name" data-field="name"`
+        + ` placeholder="${count ? 'a later goal' : 'e.g. a mount'}" autocomplete="off"></td>`
+        + '<td><input class="goal-input count-input new-goal" id="goal-new-gold" data-field="gold" placeholder="gold"'
+        + ' inputmode="decimal" autocomplete="off"></td>'
+        + '<td colspan="2"><button id="goal-add">Add goal</button></td></tr>';
 }
 
 function listItem(type, item, inner) {
@@ -847,6 +915,11 @@ function showView(name) {
 $('#prev-week').addEventListener('click', () => { viewedWeek = shiftWeek(viewedWeek, -1); renderWeek(); });
 $('#next-week').addEventListener('click', () => { viewedWeek = shiftWeek(viewedWeek, 1); renderWeek(); });
 $('#this-week').addEventListener('click', () => { viewedWeek = currentWeekKey(); renderWeek(); });
+$('#hide-loot').addEventListener('change', e => {
+    hideLoot = e.target.checked;
+    writeSetting('goldmaker.hideLoot', hideLoot ? '1' : '0');
+    renderWeek();
+});
 
 $('#grid').addEventListener('click', e => {
     const deposit = e.target.closest('button[data-deposit]');
@@ -1028,23 +1101,67 @@ function editGold(btn, charId, actId) {
     input.addEventListener('blur', () => finish(true));
 }
 
-// Gold counts and the goal save when they're left, one field at a time like the loot fields.
+// Gold counts and goals save when they're left, one field at a time like the loot fields. The
+// fields for a new goal wait for Enter or the Add button instead.
 $('#gold').addEventListener('focusout', e => {
     const input = e.target;
-    if (swapping || !input.matches('.count-input, .goal-input') || input.value === input.defaultValue) return;
-    if (input.dataset.goal === 'name') {
-        api('goal', { name: input.value });
+    if (swapping || !input.matches('.count-input, .goal-input') || input.matches('.new-goal')
+        || input.value === input.defaultValue) return;
+    const { id, field } = input.dataset;
+    if (field === 'name') {
+        api('goal', { id, name: input.value });
         return;
     }
     const gold = parsePrice(input.value);
-    input.classList.toggle('invalid', Number.isNaN(gold));
-    if (Number.isNaN(gold)) return;
-    if (input.dataset.goal) {
-        api('goal', { gold });
+    // A goal can't be emptied; Remove deletes it.
+    const bad = Number.isNaN(gold) || (field === 'gold' && !gold);
+    input.classList.toggle('invalid', bad);
+    if (bad) return;
+    if (field === 'gold') {
+        api('goal', { id, gold });
     } else {
         api('gold', { charId: input.dataset.char ?? null, gold });
     }
 });
+
+$('#gold').addEventListener('click', e => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    if (btn.id === 'goal-add') {
+        addGoal();
+    } else if (btn.dataset.goalFirst) {
+        api('goal', { id: btn.dataset.goalFirst, first: true });
+    } else if (btn.dataset.goalRemove) {
+        const i = state.goals.findIndex(g => g.id === btn.dataset.goalRemove);
+        if (i >= 0 && confirm(`Remove the goal "${goalName(state.goals[i], i)}"?`)) {
+            api('goal', { id: state.goals[i].id, remove: true });
+        }
+    }
+});
+
+let addingGoal = false; // so a double click or a repeated Enter adds the goal once
+
+async function addGoal() {
+    const gold = parsePrice($('#goal-new-gold').value);
+    const bad = Number.isNaN(gold) || !gold;
+    $('#goal-new-gold').classList.toggle('invalid', bad);
+    if (bad) {
+        $('#goal-new-gold').focus();
+        return;
+    }
+    if (addingGoal) return;
+    addingGoal = true;
+    try {
+        await api('goal', { add: true, name: $('#goal-new-name').value, gold });
+        // Only now: the re-render keeps what was typed in the field that has the focus.
+        $('#goal-new-name').value = '';
+        $('#goal-new-gold').value = '';
+    } catch {
+        // api() has already shown the error
+    } finally {
+        addingGoal = false;
+    }
+}
 
 $('#gold').addEventListener('keydown', e => {
     const input = e.target;
@@ -1054,10 +1171,17 @@ $('#gold').addEventListener('keydown', e => {
         input.blur();
         return;
     }
+    if (e.key === 'Enter' && input.matches('.new-goal')) {
+        e.preventDefault();
+        addGoal();
+        return;
+    }
     const up = e.key === 'ArrowUp' || (e.key === 'Enter' && e.shiftKey);
     if (!up && e.key !== 'ArrowDown' && e.key !== 'Enter') return;
     e.preventDefault();
-    const fields = [...$('#gold').querySelectorAll('.count-input')];
+    // A goal's fields move within their own column, the gold counts down their list.
+    const fields = [...$('#gold').querySelectorAll(input.matches('.goal-input')
+        ? `.goal-input[data-field="${input.dataset.field}"]` : '.gold-list .count-input')];
     const next = fields[fields.indexOf(input) + (up ? -1 : 1)];
     if (next) {
         next.focus();

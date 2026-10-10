@@ -405,19 +405,54 @@ check('null clears the bank', $state['bank'] === null, $state['bank']);
 [, $state] = call('deposit', ['week' => $week, 'charId' => $char['id'], 'gold' => 700]);
 check('a deposit with no bank count starts one', $state['bank'] === ['gold' => 700, 'time' => null], $state['bank']);
 
+// ---------- Goals ----------
+
 [, $state] = call('state');
-check('a file without a goal has none', $state['goal'] === ['gold' => 0, 'name' => ''], $state['goal']);
-call('goal', ['gold' => '2500000']);
-[, $state] = call('goal', ['name' => '  Mount  ']);
-check('goal fields are saved one at a time', $state['goal'] === ['gold' => 2500000, 'name' => 'Mount'], $state['goal']);
-foreach ([['gold' => -1], ['gold' => 'lots']] as $bad) {
+check('a file without goals has none', $state['goals'] === [], $state['goals']);
+[, $state] = call('goal', ['add' => true, 'name' => '  Mount  ', 'gold' => '2500000']);
+call('goal', ['add' => true, 'name' => 'Pet', 'gold' => 400000]);
+[, $state] = call('goal', ['add' => true, 'gold' => 1e6]);
+check('goals are added at the end, with g… ids', array_column($state['goals'], 'name') === ['Mount', 'Pet', '']
+    && array_column($state['goals'], 'gold') === [2500000, 400000, 1000000]
+    && count(preg_grep('/^g[0-9a-f]+$/', array_column($state['goals'], 'id'))) === 3, $state['goals']);
+[$mount, $pet, $third] = array_column($state['goals'], 'id');
+call('goal', ['id' => $pet, 'gold' => '450000.4']);
+[, $state] = call('goal', ['id' => $pet, 'name' => 'Rare pet']);
+check('goal fields are saved one at a time', $state['goals'][1] === ['id' => $pet, 'name' => 'Rare pet', 'gold' => 450000], $state['goals']);
+[, $state] = call('goal', ['id' => $third, 'first' => true]);
+check('"first" makes a goal the current one', array_column($state['goals'], 'id') === [$third, $mount, $pet], $state['goals']);
+[, $state] = call('goal', ['id' => $third, 'remove' => true]);
+check('removing the current goal makes the next one current', array_column($state['goals'], 'id') === [$mount, $pet], $state['goals']);
+foreach ([['add' => true, 'gold' => 0], ['add' => true, 'gold' => 'lots'], ['add' => true, 'name' => 'x'],
+    ['id' => $pet, 'gold' => null], ['id' => $pet, 'gold' => -1], ['gold' => 5]] as $bad) {
     [$status] = call('goal', $bad);
-    check('the goal ' . json_encode($bad) . ' is refused', $status === 400, $status);
+    check('the goal ' . json_encode($bad) . ' is refused', $status === 400 || $status === 404, $status);
 }
-[$status, $state] = call('import', ['data' => json_decode(file_get_contents($dataFile), true)]);
-check('an import keeps the goal', $status === 200 && $state['goal']['gold'] === 2500000, $status);
-[, $state] = call('goal', ['gold' => null]);
-check('an empty goal amount is no goal', $state['goal']['gold'] === 0, $state['goal']);
+[$status] = call('goal', ['id' => 'g0000', 'remove' => true]);
+check('an unknown goal is a 404', $status === 404, $status);
+
+$export = json_decode(file_get_contents($dataFile), true);
+[$status, $state] = call('import', ['data' => $export]);
+check('an import keeps the goals', $status === 200 && $state['goals'] === $export['goals'], $status);
+$before = file_get_contents($dataFile);
+$badGoal = $export;
+$badGoal['goals'][1]['id'] = $mount;
+[$status] = call('import', ['data' => $badGoal]);
+check('an import with a duplicate goal is refused', $status === 400 && file_get_contents($dataFile) === $before, $status);
+
+$old = $export;
+unset($old['goals']);
+$old['goal'] = ['gold' => 3000000, 'name' => 'Old mount'];
+file_put_contents($dataFile, json_encode($old));
+[, $state] = call('state');
+check('an older single goal becomes the list\'s only goal', $state['goals'] === [['id' => 'g0', 'name' => 'Old mount', 'gold' => 3000000]]
+    && !isset($state['goal']), $state['goals']);
+[, $state] = call('goal', ['id' => 'g0', 'name' => 'Renamed mount']);
+check('its id holds until the next save', $state['goals'][0]['name'] === 'Renamed mount'
+    && !isset(json_decode(file_get_contents($dataFile), true)['goal']), $state['goals']);
+$old['goal']['gold'] = 0;
+[, $state] = call('import', ['data' => $old]);
+check('an older empty goal is no goal', $state['goals'] === [], $state['goals']);
 
 // ---------- Signing out ----------
 

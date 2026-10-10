@@ -295,6 +295,40 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     check('the arrows stop at 0', JSON.stringify(golds) === '[45,0]', JSON.stringify(golds));
     server.delay.toggle = 0;
 
+    // Goals: the first is the current one; a later one counts the gold beyond it.
+    app(`state = { characters: [], bank: { gold: 1200, time: 1 },
+        goals: [{ id: 'g1', name: 'Mount', gold: 1000 }, { id: 'g2', name: 'Pet', gold: 500 }] }`);
+    const progress = total => JSON.stringify(app(`goalsProgress(${total})`).map(p => [p.pct, p.left]));
+    check('a later goal fills with the gold beyond the current one', progress(1200) === '[[100,0],[40,300]]', progress(1200));
+    check("a later goal's gold to go includes the current goal", progress(600) === '[[60,400],[0,900]]', progress(600));
+    check('no goals, no progress', app('state.goals = []; goalsProgress(500).length') === 0);
+    app(`state.goals = [{ id: 'g1', name: 'Mount', gold: 2000 }]; renderGold()`);
+    check('the header shows the current goal', elements['#nav-total'].innerHTML.includes('60% of 2k'), elements['#nav-total'].innerHTML);
+
+    // Hiding the loot activities also hides the characters who can do nothing else.
+    app(`state = {
+        characters: [{ id: 'c1', name: 'Main', level: 90 }, { id: 'c2', name: 'Lowbie', level: 70 }],
+        activities: [{ id: 'a1', name: 'Weekly', minLevel: 80, gold: 1000 },
+            { id: 'a2', name: 'Naxx', minLevel: 1, gold: 300, materials: [{ id: 'm1', name: 'Scrap' }] }],
+        completions: { '2026-09-30': { c1: { a1: 1000 }, c2: { a2: 300 } } },
+        snapshots: {}, deposits: {},
+    }; viewedWeek = '2026-09-30'; hideLoot = true; renderWeek()`);
+    let hiddenGrid = elements['#grid'].innerHTML;
+    check('hiding removes the loot columns and the characters with nothing else', !hiddenGrid.includes('data-act="a2"')
+        && !hiddenGrid.includes('Lowbie') && hiddenGrid.includes('Main') && hiddenGrid.includes('data-act="a1"'));
+    check('the totals still count what is hidden', elements['#week-summary'].innerHTML.includes('<b>1,300g</b>')
+        && hiddenGrid.includes('<span class="gold">1,300g</span>'), elements['#week-summary'].innerHTML);
+    check('the toggle says what it hides', !elements['#loot-toggle'].hidden
+        && elements['#loot-toggle span'].textContent === 'Hide Naxx (and 1 character)', elements['#loot-toggle span'].textContent);
+    app(`state.activities.push({ id: 'a3', name: 'Any level', minLevel: 1, gold: 100 }); renderWeek()`);
+    hiddenGrid = elements['#grid'].innerHTML;
+    check('a character with another activity stays', hiddenGrid.includes('Lowbie') && hiddenGrid.includes('data-char="c2" data-act="a3"')
+        && !hiddenGrid.includes('data-act="a2"'));
+    app('hideLoot = false; renderWeek()');
+    check('showing them again brings the loot back', elements['#grid'].innerHTML.includes('data-act="a2"'));
+    app(`state.activities = state.activities.filter(a => !a.materials); renderWeek()`);
+    check('without loot activities there is no toggle', elements['#loot-toggle'].hidden);
+
     context.saved = saved;
     app('state = saved');
 

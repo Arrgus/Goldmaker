@@ -13,14 +13,25 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
+/* A query container only so the header can be as wide as the window, without its scrollbar (cqw).
+   That stops the body's background from filling the window, so html has it too. */
+html { container-type: inline-size; background: var(--bg); }
+
+/* When the grid is wider than the window, the page scrolls sideways. The body grows with it, so
+   the header can stick to the left edge: it stays in view sideways and scrolls away downwards. */
 body {
     margin: 0;
+    min-width: fit-content;
     background: var(--bg);
     color: var(--text);
     font: 15px/1.4 system-ui, "Segoe UI", sans-serif;
 }
 
 header {
+    position: sticky;
+    left: 0;
+    z-index: 3;
+    width: 100cqw;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -73,6 +84,9 @@ nav button.active { border-color: var(--gold); color: var(--gold); }
 #week-summary b { font-size: 17px; }
 #week-summary b.count { color: var(--text); }
 #week-summary .muted { font-size: 12px; }
+.toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; }
+.toggle:hover { color: var(--text); }
+.toggle input { margin: 0; padding: 0; accent-color: var(--gold); cursor: pointer; }
 
 /* Separate borders so they travel with the sticky header/footer cells. The header, the footer
    and the character names stay in view while the page scrolls. */
@@ -213,13 +227,22 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .count-input:focus { outline: none; border: 1px solid var(--gold); background: var(--bg); }
 .count-input::placeholder { color: var(--border); font-style: italic; }
 
-/* Goal: a bar filling towards it, in the header and on the Gold page. */
-.goal-bar { display: inline-block; width: 120px; height: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+/* Goals: a bar filling towards each, in the header (the current one) and on the Gold page. */
+.goal-bar { display: inline-block; flex: none; width: 120px; height: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
 .goal-bar > span { display: block; height: 100%; background: var(--gold); }
-.goal { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 16px; margin-bottom: 16px; }
-.goal .count-input { border: 1px solid var(--border); }
-.goal-progress { display: flex; align-items: center; gap: 10px; padding-bottom: 6px; }
-.goal-progress .goal-bar { width: 200px; }
+.goal-list { border-collapse: collapse; margin-bottom: 20px; }
+.goal-list th, .goal-list td { padding: 4px 8px 4px 0; }
+.goal-list th { text-align: left; font-size: 12px; font-weight: 400; color: var(--muted); padding-right: 12px; }
+.goal-list tr.current th { color: var(--gold); font-weight: 600; }
+.goal-list .goal-input { padding: 3px 6px; background: transparent; border: 1px solid var(--border); }
+.goal-list .goal-input:not(.count-input) { width: 200px; }
+.goal-list .goal-input:focus { outline: none; border-color: var(--gold); background: var(--bg); }
+.goal-list .goal-input::placeholder { color: var(--muted); opacity: .6; font-style: normal; }
+.goal-list tr.new-goal > * { padding-top: 10px; }
+.goal-progress { display: flex; align-items: center; gap: 10px; }
+.goal-progress .goal-bar { width: 160px; }
+.goal-buttons { white-space: nowrap; text-align: right; }
+.goal-buttons button { padding: 2px 8px; font-size: 13px; margin-left: 4px; }
 
 /* Manage */
 .manage { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); align-items: start; gap: 20px; }

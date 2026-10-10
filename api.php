@@ -28,7 +28,7 @@ function emptyState(): array
     return [
         'characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass(),
         'deposits' => new stdClass(), 'loot' => new stdClass(), 'prices' => new stdClass(),
-        'bank' => null, 'charGold' => new stdClass(), 'goal' => ['gold' => 0, 'name' => ''],
+        'bank' => null, 'charGold' => new stdClass(), 'goals' => [],
     ];
 }
 
@@ -352,14 +352,42 @@ function normalizeCharGold(mixed $charGold): array
     return $result;
 }
 
-// The gold being saved up for, shown with a progress bar next to the total. 0 gold is no goal.
-function normalizeGoal(mixed $goal): array
+// What's being saved up for: a list of {id, name, gold}. The first is the current goal, shown with
+// a progress bar next to the total; the others come later (goalsProgress in app.js).
+function goalGold(mixed $gold): int
 {
-    $gold = $goal['gold'] ?? 0;
-    if (!is_array($goal) || !is_int($gold) || $gold < 0) {
-        fail('Bad goal');
+    if (!is_numeric($gold) || $gold < 1) {
+        fail('A goal needs an amount of gold');
     }
-    return ['gold' => $gold, 'name' => text($goal['name'] ?? '')];
+    return (int) round((float) $gold);
+}
+
+// Data from before the list had one goal, {gold, name}, where 0 gold meant none. It becomes the
+// goal "g0", so its id stays the same on every load until the next save.
+function normalizeGoals(array $data): array
+{
+    if (!array_key_exists('goals', $data)) {
+        $old = $data['goal'] ?? null;
+        $gold = is_array($old) ? ($old['gold'] ?? 0) : 0;
+        if (!is_int($gold) || $gold < 0) {
+            fail('Bad goal');
+        }
+        return $gold > 0 ? [['id' => 'g0', 'name' => text($old['name'] ?? ''), 'gold' => $gold]] : [];
+    }
+    $goals = $data['goals'];
+    if (!is_array($goals) || !array_is_list($goals)) {
+        fail('Bad goals');
+    }
+    $result = [];
+    foreach ($goals as $goal) {
+        $id = is_array($goal) ? ($goal['id'] ?? null) : null;
+        if (!isId($id, 'g') || in_array($id, array_column($result, 'id'), true)
+            || !is_int($goal['gold'] ?? null) || $goal['gold'] < 1) {
+            fail('Bad or duplicate goal');
+        }
+        $result[] = ['id' => $id, 'name' => text($goal['name'] ?? ''), 'gold' => $goal['gold']];
+    }
+    return $result;
 }
 
 // ---------- Closed weeks ----------
@@ -471,6 +499,9 @@ function loadState(): array
     if (!is_array($state)) {
         fail('The data file is damaged (' . json_last_error_msg() . '). Nothing was changed; restore goldmaker.json from a backup.', 500);
     }
+    // Before emptyState() fills in an empty list, which would hide an older single goal.
+    $state['goals'] = normalizeGoals($state);
+    unset($state['goal']);
     $state += emptyState();
     $state['completions'] = normalizeCompletions($state['completions']);
     $state['snapshots'] = normalizeSnapshots($state['snapshots']);
@@ -479,7 +510,6 @@ function loadState(): array
     $state['prices'] = normalizePrices($state['prices']);
     $state['bank'] = normalizeBank($state['bank']);
     $state['charGold'] = normalizeCharGold($state['charGold']);
-    $state['goal'] = normalizeGoal($state['goal']);
     if (isset($state['lastWeek']) && !isWeekKey($state['lastWeek'])) {
         fail('Bad lastWeek "' . text($state['lastWeek']) . '" in the data file', 500);
     }
@@ -804,16 +834,25 @@ switch ($action) {
         break;
 
     case 'goal':
-        // The Gold page sends its goal fields one at a time, so only what's sent changes.
-        if (array_key_exists('gold', $in)) {
-            $gold = $in['gold'] ?? 0;
-            if (!is_numeric($gold) || $gold < 0) {
-                fail('Bad goal');
-            }
-            $state['goal']['gold'] = (int) round((float) $gold);
+        // "add" puts a new goal at the end of the list. With an id, "remove" deletes that goal,
+        // "first" makes it the current one, and otherwise the fields sent change: the Gold page
+        // sends them one at a time, like the loot fields.
+        if (!empty($in['add'])) {
+            $state['goals'][] = ['id' => newId('g'), 'name' => text($in['name'] ?? ''), 'gold' => goalGold($in['gold'] ?? null)];
+            break;
         }
-        if (array_key_exists('name', $in)) {
-            $state['goal']['name'] = text($in['name']);
+        $i = findIndex($state['goals'], $in['id'] ?? null);
+        if (!empty($in['remove'])) {
+            array_splice($state['goals'], $i, 1);
+        } elseif (!empty($in['first'])) {
+            array_unshift($state['goals'], ...array_splice($state['goals'], $i, 1));
+        } else {
+            if (array_key_exists('gold', $in)) {
+                $state['goals'][$i]['gold'] = goalGold($in['gold']);
+            }
+            if (array_key_exists('name', $in)) {
+                $state['goals'][$i]['name'] = text($in['name']);
+            }
         }
         break;
 
@@ -835,7 +874,7 @@ switch ($action) {
             'prices' => normalizePrices($data['prices'] ?? []),
             'bank' => normalizeBank($data['bank'] ?? null),
             'charGold' => normalizeCharGold($data['charGold'] ?? []),
-            'goal' => normalizeGoal($data['goal'] ?? []),
+            'goals' => normalizeGoals($data),
         ];
         if (isWeekKey($data['lastWeek'] ?? null)) {
             // The next request closes the file's last week with the imported setup.
