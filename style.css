@@ -328,3 +328,13 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
     .goal-buttons button:first-child { margin-left: 0; }
     .gold-list td.muted { white-space: normal; }
 }
+
+/* Touch screens pan a page that's wider than the screen differently: the browser widens the layout
+   viewport to fit it and moves the visual one, which sticky positioning can't follow, so the header
+   would slide away sideways. There the grid scrolls in a box of its own instead, at most a screen
+   high: the page never gets wider than the screen, and the grid's header row, footer and character
+   names still stick inside the box. */
+@media (pointer: coarse) {
+    body { min-width: 0; }
+    #grid { overflow: auto; max-height: 100vh; max-height: 100dvh; border-radius: 8px; }
+}
