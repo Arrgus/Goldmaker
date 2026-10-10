@@ -70,8 +70,9 @@ button.danger:hover { border-color: var(--danger); color: var(--danger); }
 nav { display: flex; gap: 6px; }
 #logout { margin-left: auto; }
 body.signed-out nav, body.signed-out #logout, body.signed-out #nav-total { display: none; }
-/* The grand total from the Gold page, always in view. */
+/* The grand total from the Gold page, always in view, and the current goal from the Goals page. */
 #nav-total { display: flex; align-items: center; gap: 10px; margin-left: auto; font-size: 17px; font-weight: 600; color: var(--gold); background: none; border-color: transparent; }
+#nav-total .nav-goal { display: flex; align-items: center; gap: inherit; }
 #nav-total .goal-pct { font-size: 12px; font-weight: 400; color: var(--muted); }
 #nav-total:hover { border-color: var(--gold); }
 #nav-total:not([hidden]) + #logout { margin-left: 0; }
@@ -234,7 +235,7 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .count-input:focus { outline: none; border: 1px solid var(--gold); background: var(--bg); }
 .count-input::placeholder { color: var(--border); font-style: italic; }
 
-/* Goals: a bar filling towards each, in the header (the current one) and on the Gold page. */
+/* Goals: a bar filling towards each, in the header (the current one) and on the Goals page. */
 /* A later goal's bar has two fills: if it were the current goal (pale, behind) and on top of the
    current goal (bright, in front). */
 .goal-bar { position: relative; display: inline-block; flex: none; width: 120px; height: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }

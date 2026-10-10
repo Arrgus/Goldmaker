@@ -373,6 +373,7 @@ function render() {
     renderWeek();
     renderHistory();
     renderGold();
+    renderGoals();
     renderManage();
 }
 
@@ -759,21 +760,20 @@ function parseGoalPrice(str) {
     return euros > 0 ? { euros } : null;
 }
 
+// The Gold page: the gold counted in the bank and on each character. Also the header's total,
+// with the progress towards the current goal next to it (the total opens this page, the goal Goals).
 function renderGold() {
     const { bank, chars, total } = goldOnHand();
     const counted = state.bank || state.characters.some(c => state.charGold?.[c.id]);
-    const goals = goalsProgress(total);
-    const current = goals[0];
-    const average = goals.length ? weeklyAverage() : null;
-    const currentWeeks = current?.alone && weeksToGo(current.alone.left, average);
+    const current = goalsProgress(total)[0];
+    const currentWeeks = current?.alone && weeksToGo(current.alone.left, weeklyAverage());
+    const goalTitle = current?.alone && `${goalName(current.goal, 0)}: ${fmtGold(total)} of ${fmtGold(current.alone.need)}, `
+        + (current.alone.left ? `${fmtGold(current.alone.left)} to go${currentWeeks ? `, ${fmtWeeks(currentWeeks)}` : ''}` : 'reached')
+        + '. Click to see the goals.';
     $('#nav-total').hidden = !counted && !current;
-    $('#nav-total').innerHTML = `<span>${fmtGold(total)}</span>`
-        + (current?.alone ? `${progressBar(current.alone.pct)}<span class="goal-pct">${current.alone.pct}% of ${fmtShort(current.alone.need)}</span>` : '');
-    $('#nav-total').title = current?.alone
-        ? `${goalName(current.goal, 0)}: ${fmtGold(total)} of ${fmtGold(current.alone.need)}, `
-            + (current.alone.left ? `${fmtGold(current.alone.left)} to go${currentWeeks ? `, ${fmtWeeks(currentWeeks)}` : ''}` : 'reached')
-            + '. Click to update.'
-        : 'All your gold: the bank plus every character. Click to update it.';
+    $('#nav-total').innerHTML = `<span title="All your gold: the bank plus every character. Click to update it.">${fmtGold(total)}</span>`
+        + (current?.alone ? `<span class="nav-goal" title="${esc(goalTitle)}">${progressBar(current.alone.pct)}`
+            + `<span class="goal-pct">${current.alone.pct}% of ${fmtShort(current.alone.need)}</span></span>` : '');
 
     const since = depositedSinceCount();
     const bankNote = [
@@ -795,12 +795,19 @@ function renderGold() {
             <div><span class="muted">In the bank</span><b class="count">${fmtGold(bank)}</b></div>
             <div><span class="muted">On characters</span><b class="count">${fmtGold(chars)}</b></div>
         </div>
-        <table class="goal-list">${goals.map((g, i) => goalRow(g, i, average)).join('')}${newGoalRow(goals.length)}${reserveRow()}</table>
-        ${goals.length ? averageLine(average) : ''}
-        ${tokenSection()}
         <table class="gold-list">${rows}</table>
         <p class="muted">Type in the gold as the game shows it (1,234,567, 250k or 1.2m). Enter or ↓ moves to the next field,
             Escape undoes the typing, and an empty field means not counted.</p>`);
+}
+
+// The Goals page: what's being saved up for, how far the gold goes and the WoW Token, which pays
+// for goals in euros.
+function renderGoals() {
+    const goals = goalsProgress(goldOnHand().total);
+    const average = goals.length ? weeklyAverage() : null;
+    setHtml($('#goals'), `<table class="goal-list">${goals.map((g, i) => goalRow(g, i, average)).join('')}${newGoalRow(goals.length)}${reserveRow()}</table>
+        ${goals.length ? averageLine(average) : ''}
+        ${tokenSection()}`);
     loadTokenLog();
 }
 
@@ -902,7 +909,7 @@ function reserveRow() {
 
 // ---------- WoW Token ----------
 // The server logs every price it looks up (TOKEN_LOG_FILE in api.php), every few minutes even while
-// no page is open. The Gold page shows that history and when the price usually dips, so the tokens
+// no page is open. The Goals page shows that history and when the price usually dips, so the tokens
 // for goals in euros can be bought cheaply, along with the Battle.net Balance of tokens already bought.
 
 const DAY = 86400; // s
@@ -910,10 +917,10 @@ let tokenLog = null; // [[time, gold], …] oldest first, from the "tokenHistory
 let tokenLogRun = null;
 
 // Fetches the log entries the page doesn't have yet, whenever the state has a newer price than
-// them. Only while the Gold page is shown: the log grows by a few hundred entries a day.
+// them. Only while the Goals page is shown: the log grows by a few hundred entries a day.
 function loadTokenLog() {
     const have = tokenLog?.length ? tokenLog.at(-1)[0] : 0;
-    const showing = !$('#view-gold').hidden && !$('main').hidden;
+    const showing = !$('#view-goals').hidden && !$('main').hidden;
     if (tokenLogRun || !showing || (tokenLog && have >= (state.tokenPrice?.time || 0))) return;
     const signOutsBefore = signOuts;
     tokenLogRun = send('tokenHistory', { since: have }).then(({ ok, data }) => {
@@ -1427,12 +1434,13 @@ $('#char-form').elements.class.innerHTML = Object.keys(CLASSES)
 
 // ---------- Events ----------
 
-document.querySelectorAll('nav button, #nav-total').forEach(btn => btn.addEventListener('click', () => showView(btn.dataset.view)));
+document.querySelectorAll('nav button').forEach(btn => btn.addEventListener('click', () => showView(btn.dataset.view)));
+$('#nav-total').addEventListener('click', e => showView(e.target.closest('.nav-goal') ? 'goals' : 'gold'));
 
 function showView(name) {
     document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === name));
     document.querySelectorAll('main > section').forEach(s => s.hidden = s.id !== `view-${name}`);
-    if (name === 'gold') loadTokenLog();
+    if (name === 'goals') loadTokenLog();
 }
 
 $('#prev-week').addEventListener('click', () => { viewedWeek = shiftWeek(viewedWeek, -1); renderWeek(); });
@@ -1626,7 +1634,7 @@ function editGold(btn, charId, actId) {
 
 // Gold counts and goals save when they're left, one field at a time like the loot fields. The
 // fields for a new goal wait for Enter or the Add button instead.
-$('#gold').addEventListener('focusout', e => {
+function saveGoldField(e) {
     const input = e.target;
     if (swapping || !input.matches('.count-input, .goal-input') || input.matches('.new-goal')
         || input.value === input.defaultValue) return;
@@ -1655,9 +1663,11 @@ $('#gold').addEventListener('focusout', e => {
     } else {
         api('gold', { charId: input.dataset.char ?? null, gold });
     }
-});
+}
+$('#gold').addEventListener('focusout', saveGoldField);
+$('#goals').addEventListener('focusout', saveGoldField);
 
-$('#gold').addEventListener('click', e => {
+$('#goals').addEventListener('click', e => {
     const btn = e.target.closest('button');
     if (!btn) return;
     if (btn.id === 'token-refresh') {
@@ -1665,7 +1675,7 @@ $('#gold').addEventListener('click', e => {
     } else if (btn.dataset.tokenRange) {
         tokenRange = btn.dataset.tokenRange;
         writeSetting('goldmaker.tokenRange', tokenRange);
-        renderGold();
+        renderGoals();
     } else if (btn.id === 'goal-add') {
         addGoal();
     } else if (btn.dataset.goalFirst) {
@@ -1678,19 +1688,20 @@ $('#gold').addEventListener('click', e => {
     }
 });
 
-$('#gold').addEventListener('change', e => {
+$('#goals').addEventListener('change', e => {
     if (e.target.id !== 'count-this-week') return;
     countThisWeek = e.target.checked;
     writeSetting('goldmaker.countThisWeek', countThisWeek ? '1' : '0');
-    renderGold();
+    renderGold(); // the header's goal shows the weeks to go too
+    renderGoals();
 });
 
 // The chart's crosshair follows the pointer to the nearest logged price.
-$('#gold').addEventListener('pointermove', e => {
+$('#goals').addEventListener('pointermove', e => {
     const plot = e.target.closest('.token-plot');
     if (plot) showChartPoint(plot, e.clientX);
 });
-$('#gold').addEventListener('pointerout', e => {
+$('#goals').addEventListener('pointerout', e => {
     const plot = e.target.closest('.token-plot');
     if (plot && !plot.contains(e.relatedTarget)) plot.classList.remove('hovering');
 });
@@ -1719,7 +1730,8 @@ async function addGoal() {
     }
 }
 
-$('#gold').addEventListener('keydown', e => {
+// Enter or ↓ moves to the next field, Shift+Enter or ↑ to the one above, Escape undoes the typing.
+function goldFieldKey(e) {
     const input = e.target;
     if (!input.matches('.count-input, .goal-input')) return;
     if (e.key === 'Escape') {
@@ -1736,7 +1748,7 @@ $('#gold').addEventListener('keydown', e => {
     if (!up && e.key !== 'ArrowDown' && e.key !== 'Enter') return;
     e.preventDefault();
     // A goal's fields move within their own column, the gold counts down their list.
-    const fields = [...$('#gold').querySelectorAll(input.matches('.goal-input')
+    const fields = [...e.currentTarget.querySelectorAll(input.matches('.goal-input')
         ? `.goal-input[data-field="${input.dataset.field}"]` : '.gold-list .count-input')];
     const next = fields[fields.indexOf(input) + (up ? -1 : 1)];
     if (next) {
@@ -1745,7 +1757,9 @@ $('#gold').addEventListener('keydown', e => {
     } else if (e.key === 'Enter') {
         input.blur();
     }
-});
+}
+$('#gold').addEventListener('keydown', goldFieldKey);
+$('#goals').addEventListener('keydown', goldFieldKey);
 
 $('#history').addEventListener('click', e => {
     const row = e.target.closest('.history-row');

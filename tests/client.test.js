@@ -383,10 +383,10 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     check('the lowest 3 hours include the dip', [4, 5, 6].includes(app('patternPeak(pricePattern(tokenLog, 24, d => d.getHours(), DAY / 2), 3, -1).from')));
     check('the weekly pattern waits for more days', app('pricePattern(tokenLog, 7, weekdaySlot, 3.5 * DAY)') === null);
     app(`state = { characters: [], goals: [{ id: 'g1', name: 'Sub', euros: 26 }], reserve: 0, armoryEnabled: true,
-        tokenPrice: { gold: 300000, time: tokenLog.at(-1)[0] } }; tokenRange = '7'; renderGold()`);
-    const gold = elements['#gold'].innerHTML;
-    check('the token panel shows the chart and the hourly pattern', gold.includes('class="token-plot"') && gold.includes('Usually lowest around <b>')
-        && gold.includes('id="token-refresh"') && gold.includes('Shows after 2 weeks of prices'));
+        tokenPrice: { gold: 300000, time: tokenLog.at(-1)[0] } }; tokenRange = '7'; renderGoals()`);
+    const goals = elements['#goals'].innerHTML;
+    check('the token panel shows the chart and the hourly pattern', goals.includes('class="token-plot"') && goals.includes('Usually lowest around <b>')
+        && goals.includes('id="token-refresh"') && goals.includes('Shows after 2 weeks of prices'));
 
     app(`tokenLog = Array.from({ length: 10 }, (_, i) => [Math.floor(Date.now() / 1000) - 3 * DAY + i * 7 * 3600, (i + 1) * 100])`);
     check('a good price is the cheapest 10% of 30 days', app('goodTokenPrice()') === 200, app('goodTokenPrice()'));
