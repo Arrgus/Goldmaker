@@ -295,15 +295,32 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     check('the arrows stop at 0', JSON.stringify(golds) === '[45,0]', JSON.stringify(golds));
     server.delay.toggle = 0;
 
-    // Goals: the first is the current one; a later one counts the gold beyond it.
-    app(`state = { characters: [], bank: { gold: 1200, time: 1 },
+    // Goals: the first is the current one. A later one shows how far the gold goes on its own and
+    // how far the gold beyond the current one goes. Every goal also needs the reserve.
+    app(`state = { characters: [], bank: { gold: 1200, time: 1 }, reserve: 0,
         goals: [{ id: 'g1', name: 'Mount', gold: 1000 }, { id: 'g2', name: 'Pet', gold: 500 }] }`);
-    const progress = total => JSON.stringify(app(`goalsProgress(${total})`).map(p => [p.pct, p.left]));
-    check('a later goal fills with the gold beyond the current one', progress(1200) === '[[100,0],[40,300]]', progress(1200));
-    check("a later goal's gold to go includes the current goal", progress(600) === '[[60,400],[0,900]]', progress(600));
+    const progress = total => JSON.stringify(app(`goalsProgress(${total})`)
+        .map(p => [p.alone && [p.alone.pct, p.alone.left], p.onTop && [p.onTop.pct, p.onTop.left]]));
+    check('a later goal fills with the gold beyond the current one', progress(1200) === '[[[100,0],null],[[100,0],[40,300]]]', progress(1200));
+    check("a later goal's gold to go includes the current goal", progress(600) === '[[[60,400],null],[[100,0],[0,900]]]', progress(600));
+    check('a later goal also shows how far the gold goes on its own', progress(300) === '[[[30,700],null],[[60,200],[0,1200]]]', progress(300));
+    app('state.reserve = 500');
+    check('the reserve is added to every goal', progress(1200) === '[[[80,300],null],[[100,0],[0,800]]]', progress(1200));
     check('no goals, no progress', app('state.goals = []; goalsProgress(500).length') === 0);
-    app(`state.goals = [{ id: 'g1', name: 'Mount', gold: 2000 }]; renderGold()`);
-    check('the header shows the current goal', elements['#nav-total'].innerHTML.includes('60% of 2k'), elements['#nav-total'].innerHTML);
+    app(`state.reserve = 500; state.goals = [{ id: 'g1', name: 'Mount', gold: 2000 }]; renderGold()`);
+    check('the header shows the current goal with the reserve', elements['#nav-total'].innerHTML.includes('48% of 2.5k'), elements['#nav-total'].innerHTML);
+
+    // Goals in euros cost whole WoW Tokens (13€ each) at the last known price.
+    app(`state.reserve = 0; state.tokenPrice = null; state.goals = [{ id: 'g1', name: 'Mount', gold: 1000 }, { id: 'g2', name: 'Game time', euros: 26.01 }]`);
+    check('a goal in euros waits for the token price', progress(1500) === '[[[100,0],null],[null,null]]', progress(1500));
+    app('state.tokenPrice = { gold: 300, time: 1 }');
+    check('a goal in euros needs whole tokens', app('goalCost(state.goals[1]).tokens') === 3 && app('goalCost({ euros: 26 }).tokens') === 2
+        && progress(1500) === '[[[100,0],null],[[100,0],[55,400]]]', progress(1500));
+    app(`state.goals.reverse(); state.tokenPrice = null`);
+    check('without a known cost for the current goal, a later one shows only its own progress', JSON.stringify(app('goalsProgress(500)')[1].onTop) === 'null');
+    check('goal prices read gold or euros', JSON.stringify([app('parseGoalPrice("2.5m")'), app('parseGoalPrice("25€")'), app('parseGoalPrice(" 14,99 eur")'),
+        app('parseGoalPrice("")'), app('parseGoalPrice("x€")'), app('parseGoalPrice("0")')])
+        === '[{"gold":2500000},{"euros":25},{"euros":14.99},null,null,null]');
 
     // Hiding the loot activities also hides the characters who can do nothing else.
     app(`state = {

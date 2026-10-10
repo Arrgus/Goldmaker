@@ -16,6 +16,7 @@ const FAILURE_WINDOW = 15 * 60;
 
 const MAX_LEVEL = 90;
 const AUTO_SYNC_INTERVAL = 6 * 3600; // app.js syncs on its own once lastSync is older than this
+const DEFAULT_RESERVE = 500000; // gold to keep in the bank after buying a goal
 
 require __DIR__ . '/armory.php';
 
@@ -28,7 +29,7 @@ function emptyState(): array
     return [
         'characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass(),
         'deposits' => new stdClass(), 'loot' => new stdClass(), 'prices' => new stdClass(),
-        'bank' => null, 'charGold' => new stdClass(), 'goals' => [],
+        'bank' => null, 'charGold' => new stdClass(), 'goals' => [], 'reserve' => DEFAULT_RESERVE, 'tokenPrice' => null,
     ];
 }
 
@@ -352,14 +353,45 @@ function normalizeCharGold(mixed $charGold): array
     return $result;
 }
 
-// What's being saved up for: a list of {id, name, gold}. The first is the current goal, shown with
-// a progress bar next to the total; the others come later (goalsProgress in app.js).
+// What's being saved up for: a list of {id, name, gold} or {id, name, euros}. The first is the
+// current goal, shown with a progress bar next to the total; the others come later. A goal priced
+// in euros costs the WoW Tokens that cover it, at tokenPrice (goalCost in app.js). The reserve is
+// gold that must stay in the bank after buying any goal, so it's added to each one.
 function goalGold(mixed $gold): int
 {
     if (!is_numeric($gold) || $gold < 1) {
         fail('A goal needs an amount of gold');
     }
     return (int) round((float) $gold);
+}
+
+function goalEuros(mixed $euros): float
+{
+    if (!is_numeric($euros) || $euros <= 0 || $euros > 100000) {
+        fail('A goal needs a price in euros');
+    }
+    return round((float) $euros, 2);
+}
+
+// A goal's price from a request: euros when they're sent, gold otherwise.
+function goalPrice(array $in): array
+{
+    return array_key_exists('euros', $in) ? ['euros' => goalEuros($in['euros'])] : ['gold' => goalGold($in['gold'] ?? null)];
+}
+
+function normalizeReserve(mixed $reserve): int
+{
+    if (!is_int($reserve) || $reserve < 0) {
+        fail('Bad reserve');
+    }
+    return $reserve;
+}
+
+// The WoW Token's Auction House price, from the "tokenPrice" action: {gold, time}, or null before
+// the first lookup.
+function normalizeTokenPrice(mixed $price): ?array
+{
+    return $price === null ? null : goldCount($price, 'the WoW Token price');
 }
 
 // Data from before the list had one goal, {gold, name}, where 0 gold meant none. It becomes the
@@ -381,11 +413,17 @@ function normalizeGoals(array $data): array
     $result = [];
     foreach ($goals as $goal) {
         $id = is_array($goal) ? ($goal['id'] ?? null) : null;
-        if (!isId($id, 'g') || in_array($id, array_column($result, 'id'), true)
-            || !is_int($goal['gold'] ?? null) || $goal['gold'] < 1) {
+        $gold = $goal['gold'] ?? null;
+        $euros = $goal['euros'] ?? null;
+        $price = match (true) {
+            is_int($gold) && $gold >= 1 && $euros === null => ['gold' => $gold],
+            (is_int($euros) || is_float($euros)) && $euros > 0 && $gold === null => ['euros' => $euros],
+            default => null,
+        };
+        if (!isId($id, 'g') || in_array($id, array_column($result, 'id'), true) || $price === null) {
             fail('Bad or duplicate goal');
         }
-        $result[] = ['id' => $id, 'name' => text($goal['name'] ?? ''), 'gold' => $goal['gold']];
+        $result[] = ['id' => $id, 'name' => text($goal['name'] ?? '')] + $price;
     }
     return $result;
 }
@@ -510,6 +548,8 @@ function loadState(): array
     $state['prices'] = normalizePrices($state['prices']);
     $state['bank'] = normalizeBank($state['bank']);
     $state['charGold'] = normalizeCharGold($state['charGold']);
+    $state['reserve'] = normalizeReserve($state['reserve']);
+    $state['tokenPrice'] = normalizeTokenPrice($state['tokenPrice']);
     if (isset($state['lastWeek']) && !isWeekKey($state['lastWeek'])) {
         fail('Bad lastWeek "' . text($state['lastWeek']) . '" in the data file', 500);
     }
@@ -654,14 +694,20 @@ if ($expires - time() < SESSION_TTL / 2) {
 
 // Armory lookups can take seconds, so they run before the exclusive lock is taken; the
 // results are applied by character id below, skipping anyone deleted in the meantime.
+// The WoW Token price is looked up the same way.
 $armory = [];
 $armoryError = null;
-if ($action === 'sync') {
+$tokenPrice = null;
+if ($action === 'sync' || $action === 'tokenPrice') {
     if (!armoryConfigured()) {
         fail('Armory sync is not configured: set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET');
     }
     try {
-        $armory = fetchArmoryCharacters(readStateSnapshot()['characters'] ?? []);
+        if ($action === 'sync') {
+            $armory = fetchArmoryCharacters(readStateSnapshot()['characters'] ?? []);
+        } else {
+            $tokenPrice = fetchTokenPrice();
+        }
     } catch (RuntimeException $e) {
         $armoryError = $e->getMessage();
     }
@@ -836,24 +882,43 @@ switch ($action) {
     case 'goal':
         // "add" puts a new goal at the end of the list. With an id, "remove" deletes that goal,
         // "first" makes it the current one, and otherwise the fields sent change: the Gold page
-        // sends them one at a time, like the loot fields.
+        // sends them one at a time, like the loot fields. Gold or euros replace the price either way.
         if (!empty($in['add'])) {
-            $state['goals'][] = ['id' => newId('g'), 'name' => text($in['name'] ?? ''), 'gold' => goalGold($in['gold'] ?? null)];
+            $state['goals'][] = ['id' => newId('g'), 'name' => text($in['name'] ?? '')] + goalPrice($in);
             break;
         }
         $i = findIndex($state['goals'], $in['id'] ?? null);
+        $goal = $state['goals'][$i];
         if (!empty($in['remove'])) {
             array_splice($state['goals'], $i, 1);
         } elseif (!empty($in['first'])) {
             array_unshift($state['goals'], ...array_splice($state['goals'], $i, 1));
         } else {
-            if (array_key_exists('gold', $in)) {
-                $state['goals'][$i]['gold'] = goalGold($in['gold']);
-            }
             if (array_key_exists('name', $in)) {
-                $state['goals'][$i]['name'] = text($in['name']);
+                $goal['name'] = text($in['name']);
             }
+            if (array_key_exists('gold', $in) || array_key_exists('euros', $in)) {
+                $goal = ['id' => $goal['id'], 'name' => $goal['name']] + goalPrice($in);
+            }
+            $state['goals'][$i] = $goal;
         }
+        break;
+
+    case 'reserve':
+        // The gold to keep in the bank after buying a goal; empty is none.
+        $gold = $in['gold'] ?? 0;
+        if (!is_numeric($gold) || $gold < 0) {
+            fail('Bad reserve');
+        }
+        $state['reserve'] = (int) round((float) $gold);
+        break;
+
+    case 'tokenPrice':
+        // Looked up before the lock (see above). A failed lookup keeps the last price.
+        if ($tokenPrice !== null) {
+            $state['tokenPrice'] = ['gold' => $tokenPrice, 'time' => time()];
+        }
+        $state['tokenPriceError'] = $armoryError;
         break;
 
     case 'import':
@@ -875,6 +940,8 @@ switch ($action) {
             'bank' => normalizeBank($data['bank'] ?? null),
             'charGold' => normalizeCharGold($data['charGold'] ?? []),
             'goals' => normalizeGoals($data),
+            'reserve' => normalizeReserve($data['reserve'] ?? DEFAULT_RESERVE),
+            'tokenPrice' => normalizeTokenPrice($data['tokenPrice'] ?? null),
         ];
         if (isWeekKey($data['lastWeek'] ?? null)) {
             // The next request closes the file's last week with the imported setup.

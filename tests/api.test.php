@@ -431,9 +431,48 @@ foreach ([['add' => true, 'gold' => 0], ['add' => true, 'gold' => 'lots'], ['add
 [$status] = call('goal', ['id' => 'g0000', 'remove' => true]);
 check('an unknown goal is a 404', $status === 404, $status);
 
+[, $state] = call('goal', ['add' => true, 'name' => 'Game time', 'euros' => '25.999']);
+$gameTime = end($state['goals'])['id'];
+check('a goal can be priced in euros, to the cent', end($state['goals']) === ['id' => $gameTime, 'name' => 'Game time', 'euros' => 26], end($state['goals']));
+[, $state] = call('goal', ['id' => $gameTime, 'gold' => 900000]);
+check('gold replaces a goal\'s euros', end($state['goals']) === ['id' => $gameTime, 'name' => 'Game time', 'gold' => 900000], end($state['goals']));
+[, $state] = call('goal', ['id' => $gameTime, 'euros' => 13]);
+check('euros replace a goal\'s gold', end($state['goals']) === ['id' => $gameTime, 'name' => 'Game time', 'euros' => 13], end($state['goals']));
+foreach ([['euros' => 0], ['euros' => 'lots'], ['euros' => -5]] as $bad) {
+    [$status] = call('goal', ['id' => $gameTime] + $bad);
+    check('the goal price ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+
+[, $state] = call('state');
+check('the reserve starts at 500k', $state['reserve'] === 500000 && $state['tokenPrice'] === null, [$state['reserve'], $state['tokenPrice']]);
+[, $state] = call('reserve', ['gold' => '250000.4']);
+check('the reserve is whole gold', $state['reserve'] === 250000, $state['reserve']);
+[, $state] = call('reserve', ['gold' => null]);
+check('an empty reserve is none', $state['reserve'] === 0, $state['reserve']);
+foreach ([['gold' => -1], ['gold' => 'x']] as $bad) {
+    [$status] = call('reserve', $bad);
+    check('the reserve ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+call('reserve', ['gold' => 400000]);
+[$status, $reply] = call('tokenPrice', []);
+check('the token price needs the Battle.net API', $status === 400 && str_contains($reply['error'] ?? '', 'not configured'), [$status, $reply]);
+
 $export = json_decode(file_get_contents($dataFile), true);
+$export['tokenPrice'] = ['gold' => 364300, 'time' => 1760000000];
 [$status, $state] = call('import', ['data' => $export]);
-check('an import keeps the goals', $status === 200 && $state['goals'] === $export['goals'], $status);
+check('an import keeps the goals, the reserve and the token price', $status === 200 && $state['goals'] === $export['goals']
+    && $state['reserve'] === 400000 && $state['tokenPrice'] === $export['tokenPrice'], $status);
+$before = file_get_contents($dataFile);
+$bothPrices = $export;
+$bothPrices['goals'][0]['euros'] = 10;
+$badReserve = $export;
+$badReserve['reserve'] = -1;
+foreach (['a goal with both gold and euros' => $bothPrices, 'a bad reserve' => $badReserve] as $what => $data) {
+    [$status] = call('import', ['data' => $data]);
+    check("an import with $what is refused", $status === 400 && file_get_contents($dataFile) === $before, $status);
+}
+call('goal', ['id' => $gameTime, 'remove' => true]);
+$export = json_decode(file_get_contents($dataFile), true);
 $before = file_get_contents($dataFile);
 $badGoal = $export;
 $badGoal['goals'][1]['id'] = $mount;

@@ -337,19 +337,21 @@ $('#login-form').addEventListener('submit', async e => {
         form.reset();
         error.hidden = true;
         await api('state');
-        autoSync();
+        autoRefresh();
     } finally {
         submit.disabled = false;
     }
 });
 
 // The page signs out at once, but the logout request waits for requests already underway
-// (including a sync), so none of them can renew the session cookie after it has been cleared.
+// (including a sync or a token price lookup), so none of them can renew the session cookie after
+// it has been cleared.
 $('#logout').addEventListener('click', () => {
     signOuts++;
     setSignedIn(false);
     enqueue(async () => {
         await syncRun?.catch(() => {});
+        await tokenPriceRun;
         await send('logout', {});
     });
 });
@@ -641,26 +643,68 @@ function countField(id, count, attrs, title) {
         + ` inputmode="decimal" autocomplete="off" title="${esc(title)}">`;
 }
 
-// Progress towards each goal. The first is the current one; a later goal is reached with the gold
-// beyond the current one, so its bar shows how far that goes, and left is what's still needed for
-// the current goal and that one together.
+// A goal can be priced in euros (real-money purchases): it then costs the WoW Tokens that cover
+// it. A token is redeemed for 13€ of Battle.net Balance in the EU, and tokens can't be split.
+const TOKEN_EUROS = 13;
+const TOKEN_REFRESH = 3600; // s; the token price is looked up again after this while it's needed
+
+// What a goal costs in gold: its gold, or the tokens for its euros at the last known price.
+// gold is null while there's no price yet.
+function goalCost(goal) {
+    if (goal.euros == null) return { gold: goal.gold, tokens: null };
+    const tokens = Math.ceil(Math.round(goal.euros * 100) / (TOKEN_EUROS * 100));
+    const price = state.tokenPrice?.gold;
+    return { gold: price ? tokens * price : null, tokens };
+}
+
+// Progress towards each goal. Every goal also needs the reserve to stay in the bank once it's
+// bought. The first goal is the current one. A later one shows two things: how far the gold goes
+// if it were the current goal (alone), and how far the gold beyond the current goal goes towards
+// it (onTop), whose "left" is what the current goal and this one need together. Either is null
+// when a cost isn't known yet (a goal in euros before the token price is in).
 function goalsProgress(total) {
-    const [current, ...later] = state.goals || [];
-    if (!current) return [];
-    const pct = (have, need) => Math.min(100, Math.floor((have / need) * 100));
-    const beyond = Math.max(0, total - current.gold);
-    return [
-        { goal: current, pct: pct(total, current.gold), left: Math.max(0, current.gold - total) },
-        ...later.map(goal => ({ goal, pct: pct(beyond, goal.gold), left: Math.max(0, current.gold + goal.gold - total) })),
-    ];
+    const reserve = state.reserve || 0;
+    const pct = (have, need) => need > 0 ? Math.max(0, Math.min(100, Math.floor((have / need) * 100))) : 100;
+    const goals = (state.goals || []).map(goal => ({ goal, ...goalCost(goal) }));
+    const current = goals[0];
+    return goals.map((g, i) => {
+        if (g.gold == null) return { ...g, alone: null, onTop: null };
+        const need = g.gold + reserve;
+        const alone = { need, pct: pct(total, need), left: Math.max(0, need - total) };
+        const onTop = !i || current.gold == null ? null : {
+            pct: pct(total - current.gold - reserve, g.gold),
+            left: Math.max(0, current.gold + g.gold + reserve - total),
+        };
+        return { ...g, alone, onTop };
+    });
 }
 
 function goalName(goal, i) {
     return goal.name || (i ? 'Later goal' : 'Current goal');
 }
 
-function progressBar(pct) {
-    return `<span class="goal-bar"><span style="width:${pct}%"></span></span>`;
+// A bar filling towards a goal. A later goal's has two fills: how far the gold goes if it were the
+// current goal (paler, behind), and how far the gold beyond the current goal goes (in front).
+function progressBar(pct, behind = null) {
+    return '<span class="goal-bar">' + (behind == null ? '' : `<span class="alone" style="width:${behind}%"></span>`)
+        + `<span style="width:${pct}%"></span></span>`;
+}
+
+function fmtEuros(euros) {
+    return `${Number.isInteger(euros) ? euros : euros.toFixed(2)}€`;
+}
+
+// A goal's price: gold as parsePrice reads it, or euros when marked with € or "eur" ("25€",
+// "14,99 €"). null when it isn't one: a goal can't be emptied, only removed.
+function parseGoalPrice(str) {
+    const s = str.trim().toLowerCase();
+    if (!/€|eur/.test(s)) {
+        const gold = parsePrice(s);
+        return gold > 0 ? { gold } : null;
+    }
+    const m = s.replace(/€|eur|\s/g, '').match(/^(\d+)(?:[.,](\d{1,2}))?$/);
+    const euros = m ? Number(`${m[1]}.${m[2] || 0}`) : 0;
+    return euros > 0 ? { euros } : null;
 }
 
 function renderGold() {
@@ -670,10 +714,10 @@ function renderGold() {
     const current = goals[0];
     $('#nav-total').hidden = !counted && !current;
     $('#nav-total').innerHTML = `<span>${fmtGold(total)}</span>`
-        + (current ? `${progressBar(current.pct)}<span class="goal-pct">${current.pct}% of ${fmtShort(current.goal.gold)}</span>` : '');
-    $('#nav-total').title = current
-        ? `${goalName(current.goal, 0)}: ${fmtGold(total)} of ${fmtGold(current.goal.gold)}, `
-            + (current.left ? `${fmtGold(current.left)} to go` : 'reached') + '. Click to update.'
+        + (current?.alone ? `${progressBar(current.alone.pct)}<span class="goal-pct">${current.alone.pct}% of ${fmtShort(current.alone.need)}</span>` : '');
+    $('#nav-total').title = current?.alone
+        ? `${goalName(current.goal, 0)}: ${fmtGold(total)} of ${fmtGold(current.alone.need)}, `
+            + (current.alone.left ? `${fmtGold(current.alone.left)} to go` : 'reached') + '. Click to update.'
         : 'All your gold: the bank plus every character. Click to update it.';
 
     const since = depositedSinceCount();
@@ -696,27 +740,52 @@ function renderGold() {
             <div><span class="muted">In the bank</span><b class="count">${fmtGold(bank)}</b></div>
             <div><span class="muted">On characters</span><b class="count">${fmtGold(chars)}</b></div>
         </div>
-        <table class="goal-list">${goals.map(goalRow).join('')}${newGoalRow(goals.length)}</table>
+        <table class="goal-list">${goals.map(goalRow).join('')}${newGoalRow(goals.length)}${reserveRow()}</table>
+        ${tokenStatus()}
         <table class="gold-list">${rows}</table>
         <p class="muted">Type in the gold as the game shows it (1,234,567, 250k or 1.2m). Enter or ↓ moves to the next field,
             Escape undoes the typing, and an empty field means not counted.</p>`);
 }
 
-// A goal's row: its name and gold, which save when they're left, and its progress.
-function goalRow({ goal, pct, left }, i) {
+// A goal's row: its name and price, which save when they're left, and its progress.
+function goalRow({ goal, gold, tokens, alone, onTop }, i) {
     const ids = `data-id="${goal.id}"`;
-    const current = esc(goalName(state.goals[0], 0));
-    const note = !i ? (left ? `${fmtGold(left)} to go` : 'reached ✔')
-        : left ? `${fmtGold(left)} to go for this and ${current}` : `reached, together with ${current} ✔`;
-    const title = i ? ` title="The gold beyond ${current} (${fmtGold(state.goals[0].gold)}) goes towards this goal."` : '';
+    const price = goal.euros == null ? goal.gold.toLocaleString('en-US') : fmtEuros(goal.euros);
+    const cost = tokens == null ? ''
+        : `<span class="goal-cost">${tokens} token${tokens === 1 ? '' : 's'}${gold == null ? '' : ` = ${fmtGold(gold)}`}</span>`;
     return `<tr${i ? '' : ' class="current"'}><th>${i ? 'Later' : 'Current'}</th>`
         + `<td><input class="goal-input" id="goal-name-${goal.id}" ${ids} data-field="name" value="${esc(goal.name)}"`
         + ` placeholder="${goalName({}, i)}" autocomplete="off"></td>`
-        + `<td><input class="goal-input count-input" id="goal-gold-${goal.id}" ${ids} data-field="gold"`
-        + ` value="${goal.gold.toLocaleString('en-US')}" inputmode="decimal" autocomplete="off"></td>`
-        + `<td${title}><div class="goal-progress">${progressBar(pct)}<span class="muted">${pct}%, ${note}</span></div></td>`
+        + `<td><input class="goal-input count-input" id="goal-gold-${goal.id}" ${ids} data-field="gold" value="${price}"`
+        + ` inputmode="decimal" autocomplete="off" title="Gold, or a real-money price in euros (e.g. 25€)">${cost}</td>`
+        + `<td>${goalProgressCell(alone, onTop)}</td>`
         + `<td class="goal-buttons">${i ? `<button data-goal-first="${goal.id}" title="Save up for this one now">Make current</button>` : ''}`
         + `<button class="danger" data-goal-remove="${goal.id}" title="Remove this goal">Remove</button></td></tr>`;
+}
+
+// The current goal has one bar. A later goal's bar has both fills, and both numbers in the
+// matching colours, unless the gold beyond the current goal already covers it.
+function goalProgressCell(alone, onTop) {
+    if (!alone) return '<span class="muted">Waiting for the WoW Token price</span>';
+    const reserve = state.reserve ? ` plus the ${fmtGold(state.reserve)} kept in the bank` : '';
+    const left = p => p.left ? `${fmtGold(p.left)} to go` : 'reached ✔';
+    const currentName = esc(goalName(state.goals[0], 0));
+    let text, bar, title;
+    if (!onTop) {
+        text = `${alone.pct}%, ${left(alone)}`;
+        bar = progressBar(alone.pct);
+        title = `What the goal costs${reserve}.`;
+    } else if (!onTop.left) {
+        text = `reached, even on top of ${currentName} ✔`;
+        bar = progressBar(100);
+        title = `The gold covers ${currentName}, this goal${reserve}.`;
+    } else {
+        text = `<b class="on-top">${onTop.pct}%</b> on top of ${currentName}, ${left(onTop)}`
+            + ` · <b class="alone">${alone.pct}%</b> on its own${alone.left ? `, ${left(alone)}` : ' ✔'}`;
+        bar = progressBar(onTop.pct, alone.pct);
+        title = `Bright: the gold beyond ${currentName}${reserve}, towards this goal. Pale: how far the gold goes if this were the current goal.`;
+    }
+    return `<div class="goal-progress" title="${esc(title)}">${bar}<span class="muted">${text}</span></div>`;
 }
 
 // The fields for a new goal. It goes at the end of the list, so the first goal added is the current one.
@@ -724,9 +793,28 @@ function newGoalRow(count) {
     return `<tr class="new-goal"><th>${count ? 'Add' : 'Goal'}</th>`
         + `<td><input class="goal-input new-goal" id="goal-new-name" data-field="name"`
         + ` placeholder="${count ? 'a later goal' : 'e.g. a mount'}" autocomplete="off"></td>`
-        + '<td><input class="goal-input count-input new-goal" id="goal-new-gold" data-field="gold" placeholder="gold"'
-        + ' inputmode="decimal" autocomplete="off"></td>'
+        + '<td><input class="goal-input count-input new-goal" id="goal-new-gold" data-field="gold" placeholder="gold or €"'
+        + ' inputmode="decimal" autocomplete="off" title="Gold, or a real-money price in euros (e.g. 25€)"></td>'
         + '<td colspan="2"><button id="goal-add">Add goal</button></td></tr>';
+}
+
+// The gold that must stay in the bank after buying a goal, added to every goal.
+function reserveRow() {
+    return '<tr class="reserve"><th>Keep</th><td class="muted">in the bank after buying a goal</td>'
+        + `<td><input class="goal-input count-input" id="goal-reserve" data-field="reserve" value="${(state.reserve || 0).toLocaleString('en-US')}"`
+        + ' placeholder="none" inputmode="decimal" autocomplete="off"></td>'
+        + '<td colspan="2" class="muted">Added to every goal</td></tr>';
+}
+
+// The WoW Token price that goals in euros are worked out with, once there are any.
+function tokenStatus() {
+    if (!(state.goals || []).some(g => g.euros != null)) return '';
+    const price = state.tokenPrice;
+    const parts = [price ? `WoW Token: ${fmtGold(price.gold)} for ${TOKEN_EUROS}€ of Balance, checked ${ago(price.time)}`
+        : 'WoW Token price: not loaded yet'];
+    if (!state.armoryEnabled) parts.push('the Battle.net API isn\'t set up on the server');
+    if (state.tokenPriceError) parts.push(`last lookup failed: ${esc(state.tokenPriceError)}`);
+    return `<p class="muted token-status${state.tokenPriceError ? ' sync-error' : ''}">${parts.join(' · ')}</p>`;
 }
 
 function listItem(type, item, inner) {
@@ -816,6 +904,31 @@ function renderSyncStatus() {
 
 $('#sync-btn').addEventListener('click', () => sync().catch(() => {}));
 
+// The WoW Token price for goals in euros, looked up by the server (the "tokenPrice" action) while
+// there are any and the last price is older than TOKEN_REFRESH. Like the sync, it bypasses the
+// request queue and then fetches the state through it. A failure is kept in the state and shown.
+let tokenPriceRun = null;
+let lastTokenPriceTry = 0; // ms; keeps a failing lookup from being retried every minute
+
+function autoTokenPrice() {
+    const needed = state.armoryEnabled && (state.goals || []).some(g => g.euros != null);
+    const stale = Date.now() / 1000 - (state.tokenPrice?.time || 0) > TOKEN_REFRESH;
+    if (!needed || !stale || tokenPriceRun || Date.now() - lastTokenPriceTry < 10 * 60000) return;
+    lastTokenPriceTry = Date.now();
+    const signOutsBefore = signOuts;
+    tokenPriceRun = send('tokenPrice', {}).then(reply => {
+        if (signOuts !== signOutsBefore) return;
+        check(reply);
+        return api('state');
+    }).catch(() => {}).finally(() => { tokenPriceRun = null; });
+}
+
+// Whatever the server should refresh on its own once the state is in.
+function autoRefresh() {
+    autoSync();
+    autoTokenPrice();
+}
+
 // ---------- Export ----------
 
 $('#export-btn').addEventListener('click', () => {
@@ -858,7 +971,7 @@ The current data is kept as a backup on the server.`)) return;
     try {
         await api('import', { data });
         lastAutoSync = 0; // the import cleared lastSync; refresh levels right away
-        autoSync();
+        autoRefresh();
     } catch {
         // api() has already shown the error
     }
@@ -1112,13 +1225,17 @@ $('#gold').addEventListener('focusout', e => {
         api('goal', { id, name: input.value });
         return;
     }
-    const gold = parsePrice(input.value);
-    // A goal can't be emptied; Remove deletes it.
-    const bad = Number.isNaN(gold) || (field === 'gold' && !gold);
-    input.classList.toggle('invalid', bad);
-    if (bad) return;
     if (field === 'gold') {
-        api('goal', { id, gold });
+        const price = parseGoalPrice(input.value);
+        input.classList.toggle('invalid', !price);
+        if (price) api('goal', { id, ...price }).then(autoTokenPrice, () => {});
+        return;
+    }
+    const gold = parsePrice(input.value);
+    input.classList.toggle('invalid', Number.isNaN(gold));
+    if (Number.isNaN(gold)) return;
+    if (field === 'reserve') {
+        api('reserve', { gold: gold ?? 0 });
     } else {
         api('gold', { charId: input.dataset.char ?? null, gold });
     }
@@ -1142,20 +1259,20 @@ $('#gold').addEventListener('click', e => {
 let addingGoal = false; // so a double click or a repeated Enter adds the goal once
 
 async function addGoal() {
-    const gold = parsePrice($('#goal-new-gold').value);
-    const bad = Number.isNaN(gold) || !gold;
-    $('#goal-new-gold').classList.toggle('invalid', bad);
-    if (bad) {
+    const price = parseGoalPrice($('#goal-new-gold').value);
+    $('#goal-new-gold').classList.toggle('invalid', !price);
+    if (!price) {
         $('#goal-new-gold').focus();
         return;
     }
     if (addingGoal) return;
     addingGoal = true;
     try {
-        await api('goal', { add: true, name: $('#goal-new-name').value, gold });
+        await api('goal', { add: true, name: $('#goal-new-name').value, ...price });
         // Only now: the re-render keeps what was typed in the field that has the focus.
         $('#goal-new-name').value = '';
         $('#goal-new-gold').value = '';
+        autoTokenPrice();
     } catch {
         // api() has already shown the error
     } finally {
@@ -1245,7 +1362,7 @@ setInterval(() => {
         renderWeek();
     }
     renderSyncStatus();
-    autoSync();
+    autoRefresh();
 }, 60000);
 
-api('state').then(autoSync, () => {});
+api('state').then(autoRefresh, () => {});

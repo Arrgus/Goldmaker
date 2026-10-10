@@ -37,7 +37,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 
 ## Architecture
 
-**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `gold`, `goal`, `import`, `sync`).
+**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `gold`, `goal`, `reserve`, `import`, `sync`, `tokenPrice`).
 - **Auth runs before the data file is opened.**
   - There is a single shared password. The `goldmaker_session` cookie holds `expiry.hmac`, keyed by that password, so there is no server-side session storage and changing the password signs everyone out. The cookie is renewed once it's more than halfway to expiry.
   - Every action except `state` must be a POST with a JSON content type (the CSRF defence, together with the SameSite=Lax cookie).
@@ -59,6 +59,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 - **Caching:** the OAuth token and the realm index are cached as JSON files in `DATA_DIR`.
 - **Errors:** a failure for one character is saved as `syncError` on that character. A failure of the whole sync is saved as the top-level `lastSyncError`, and `lastSync` is set either way so a broken setup isn't retried constantly. `saveCharacter` rebuilds the character, which drops `syncError`.
 - **Extra response fields:** the API response adds `armoryEnabled` and `autoSyncInterval`. They are never written to the file.
+- **WoW Token price:** the `tokenPrice` action looks up the token's Auction House price (`fetchTokenPrice`, `/data/wow/token/index` in the `dynamic` namespace, `price` in copper) the same way, before the lock. It saves it as `tokenPrice: {gold, time}`; a failure keeps the old price and is saved as `tokenPriceError`. `app.js` calls it (`autoTokenPrice`, bypassing the queue like the sync) while a goal is priced in euros and the price is older than `TOKEN_REFRESH` (1h). Not yet tried against the real API: the local config has no Battle.net keys.
 
 **Import** (the `import` action, under Manage → Data):
 - **What it does:** replaces all data with an uploaded `goldmaker.json`, first saving the old file as `DATA_DIR/backup-<timestamp>.json`.
@@ -93,7 +94,9 @@ loot: { "<weekKey>": { "<charId>": { "<actId>": { "<matId>": count } } } }  // m
 prices: { "<weekKey>": { "<matId>": gold } }  // AH price per item, see Loot below
 bank: {gold, time}|null  // gold counted in the bank, see Gold on hand below
 charGold: { "<charId>": {gold, time} }  // gold counted on each character
-goals: [{id: "g…", name, gold}]  // what's being saved up for; the first is the current goal
+goals: [{id: "g…", name, gold} | {id, name, euros}]  // what's being saved up for; the first is the current goal
+reserve: gold  // kept in the bank after buying any goal, added to every goal (default 500k)
+tokenPrice: {gold, time}|null, tokenPriceError?: string|null  // WoW Token price, for goals in euros
 lastWeek?: weekKey  // latest week a request came from
 lastSync?: unix time, lastSyncError?: string|null
 ```
@@ -128,8 +131,10 @@ lastSync?: unix time, lastSyncError?: string|null
   - Whole gold, read with `parsePrice` (which also takes `1.2m`). Field values use en-US grouping, since a locale's own (`1.234.567`) wouldn't parse back.
   - Validated on every load and on import.
   - **Goals:** a list on the Gold page. The first is the current goal, and the header shows a progress bar towards it next to the total. The others are later goals.
-    - **Progress of a later goal** counts only the gold beyond the current goal, and its "to go" is what the current goal and that one need together (`goalsProgress`). Each later goal is measured on its own against that excess, not one after another.
-    - **The `goal` action:** `add` appends a goal (gold must be above 0). With an `id`, `remove` deletes it, `first` makes it the current one, and otherwise the `name`/`gold` sent change, one field at a time like the loot fields. A goal can't be emptied, only removed.
+    - **Reserve:** `reserve` gold must stay in the bank after buying any goal, so it's added to every goal's cost (`reserve` action, empty means none).
+    - **Progress** (`goalsProgress`): the current goal needs its cost plus the reserve. A later goal shows two measures, as two fills of one bar and two numbers in matching colours. *On its own* (pale, behind) is how far the gold goes if it were the current goal. *On top* (bright, in front) is how far the gold beyond the current goal and the reserve goes towards it; its "to go" is what both goals and the reserve need together. On top can never be ahead of on its own while that's under 100%. Each later goal is measured against the current one alone, not one after another.
+    - **Goals in euros** are typed with € or "eur" in the price field (`parseGoalPrice`; "14,99 €" works). They cost whole WoW Tokens: `ceil(euros / 13)` (`TOKEN_EUROS`, the EU Balance a token gives) times `tokenPrice` (`goalCost`). Until there's a token price their progress is unknown and they're left out of the header.
+    - **The `goal` action:** `add` appends a goal with `gold` (above 0) or `euros`. With an `id`, `remove` deletes it, `first` makes it the current one, and otherwise the `name` or price sent change, one field at a time like the loot fields; gold and euros replace each other. A goal can't be emptied, only removed. Euros are kept to the cent, and JSON stores 26.0 as 26.
     - **Older data** had a single `goal: {gold, name}`. `normalizeGoals` turns it into the goal `g0` on every load until the next save, so its id stays stable until then (the import does the same).
 - **Deleting** a character or activity keeps its completion history, and it still shows in the weeks whose snapshot has it. Elsewhere entries with unknown IDs are ignored when rendering.
 - **Realms** are stored as typed by the user, in the in-game style without spaces (e.g. `ColinasPardas`); they are not Blizzard API slugs. The characters are on EU realms.
@@ -138,22 +143,13 @@ lastSync?: unix time, lastSyncError?: string|null
 
 - **Week page layout:** the totals sit next to the week's dates (`weekSummary`). The grid ends with Done, Gold (mats on a line of their own, since they aren't deposited) and Bank (the Deposit button, left out for weeks before `depositsFrom`). Rows are kept to two lines so the 26-odd characters fit on fewer screens. The header, the footer and the character names stay in view while scrolling (sticky `thead`, `tfoot` cells and row headers), so the grid needs no scroll box of its own.
 - **Hiding Naxxramas:** a checkbox next to the week's totals hides the activities with loot (`materialsOf`) and every character left with nothing visible to do, which means those below level 80. A character who can do another activity stays. The week's totals and the footer's Done, Gold and Bank still count everything, so gold not yet deposited by a hidden character still shows. The setting is per browser (`localStorage`, `readSetting`/`writeSetting`).
+- **Small screens:** up to 900px the header is compact (one row on a tablet, two on a phone). Up to 1000px History puts each week's characters on their own line, and on phones each History row and each goal stacks onto several lines. The Manage panels have no minimum width beyond the screen's.
 - **Sideways scrolling:** the page itself scrolls sideways when the grid is wider than the window. `body { min-width: fit-content }` grows with it, so the header can be `position: sticky; left: 0` at `100cqw` (the window minus its scrollbar, with `html` as the query container). It stays in view sideways and scrolls away downwards. The containment stops the body background reaching the canvas, so `html` has the background too.
+- **Colours:** `--text` and `--muted` are kept light for readability. The Week grid and the Gold page's list use their own darker `--table` background and gold-ish `--table-line`/`--table-edge` borders; the panels, header and inputs keep `--panel` and `--border`.
 - **Class colors:** the `CLASSES` map in `app.js` supplies the class colors and also fills the class `<select>`.
 - **Gold input** (`parseGold`) accepts `1900`, `1,900`, `1.9k` and `20k`. A number with one or two digits before the decimal point is read as thousands (`19` means 19k). An empty input means "use the default".
 - **1k arrows:** a ticked cell without loot has ‹/› either side of its gold (shown on the hovered row) that move it by 1k, never below 0, for things like world quests. Each click is a `toggle` with the new gold; `bumpedGold` holds the amount asked for until its reply is in, so quick clicks add up instead of each starting from the same state.
 - **Activity gold field:** it keeps `step="100"` so the arrows move by 100. Instead of letting the browser refuse a value like 1250, its `invalid` handler rounds the value down and submits again. Negative values are left for the browser's own warning.
-
-## Planned: goals priced in real money (not built yet)
-
-Some goals cost real money (game time, a shop mount). Such a goal gets a euro price instead of gold, and its gold is what the WoW Tokens to cover it cost.
-
-- **Token price:** the Blizzard Game Data API's WoW Token index, `GET https://eu.api.blizzard.com/data/wow/token/index?namespace=dynamic-eu`, called with the client-credentials token already used by `armory.php` (`armoryToken()`). It returns `price` in copper (divide by 10,000 for gold) and `last_updated_timestamp`. Check the field names against a real reply first.
-  - Fetch it with the armory `sync` (before the exclusive lock, like the character lookups), store `tokenPrice: {gold, time}` in the data file, and show its age. Refresh it at least daily.
-- **Euros to tokens:** a token is redeemed for a fixed Battle.net Balance (verify the current EU amount, believed to be €13). Tokens can't be split, so a goal needs `ceil(euros / balancePerToken)` tokens, and its gold is `tokens × token price`. Keep the per-token balance in a constant or setting.
-- **500k reserve:** at least 500,000g must stay in the bank after any goal is bought. So a goal counts as reached only when the gold on hand covers its cost plus the reserve. For later goals: current cost + this goal's cost + the reserve.
-  - Open question: should the reserve apply to gold goals too, not only money-priced ones?
-- **Data:** a goal becomes `{id, name, gold}` or `{id, name, euros}`. `normalizeGoals` validates either, and `goalsProgress` works out the gold of a money goal from `tokenPrice`. Without a token price yet, show the goal as "price unknown" and leave it out of the header bar.
 
 ## Open issues (from the September 2026 audit)
 

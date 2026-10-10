@@ -3,9 +3,16 @@
     --panel: #1d2027;
     --panel-2: #252932;
     --border: #333845;
-    --text: #e6e3da;
-    --muted: #8c909b;
+    --text: #f3f0e8;
+    --muted: #a3a7b1;
+    /* The Week grid and the Gold page's list: darker than the panels, with gold-ish lines. */
+    --table: #17191e;
+    --table-head: #1f2229;
+    --table-line: #4d4128;
+    --table-edge: #6e5b34;
     --gold: #e8b64c;
+    --gold-pale: #6e5a30;
+    --gold-pale-text: #b39a66;
     --done: #3fae62;
     --danger: #d9534f;
 }
@@ -90,11 +97,11 @@ nav button.active { border-color: var(--gold); color: var(--gold); }
 
 /* Separate borders so they travel with the sticky header/footer cells. The header, the footer
    and the character names stay in view while the page scrolls. */
-table.grid { border-collapse: separate; border-spacing: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
-.grid th, .grid td { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 5px 10px; }
+table.grid { border-collapse: separate; border-spacing: 0; background: var(--table); border: 1px solid var(--table-edge); border-radius: 8px; }
+.grid th, .grid td { border-right: 1px solid var(--table-line); border-bottom: 1px solid var(--table-line); padding: 5px 10px; }
 .grid tr > :last-child { border-right: none; }
 .grid thead { position: sticky; top: 0; z-index: 2; }
-.grid thead th { background: var(--panel-2); font-weight: 600; min-width: 90px; max-width: 150px; vertical-align: bottom; }
+.grid thead th { background: var(--table-head); font-weight: 600; min-width: 90px; max-width: 150px; vertical-align: bottom; }
 .grid thead th[title] { cursor: help; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
 .grid thead tr:first-child th:first-child { border-top-left-radius: 8px; }
 .grid thead tr:first-child th:last-child { border-top-right-radius: 8px; }
@@ -104,9 +111,9 @@ table.grid { border-collapse: separate; border-spacing: 0; background: var(--pan
 .grid thead th.total { min-width: 0; }
 .grid th .lvl { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
 .grid thead th .lvl .req:first-child { margin-left: 0; }
-.grid tbody th { text-align: left; font-weight: 500; white-space: nowrap; line-height: 1.25; background: var(--panel); }
+.grid tbody th { text-align: left; font-weight: 500; white-space: nowrap; line-height: 1.25; background: var(--table); }
 .grid tbody th, .grid thead tr:first-child th:first-child { position: sticky; left: 0; z-index: 1; }
-.grid tfoot td { position: sticky; bottom: 0; z-index: 1; background: var(--panel-2); border-bottom: none; }
+.grid tfoot td { position: sticky; bottom: 0; z-index: 1; background: var(--table-head); border-bottom: none; }
 .grid tfoot td:first-child { left: 0; z-index: 2; text-align: left; }
 .grid tfoot td, .grid .row-done, .grid .row-gold, .grid .row-bank { color: var(--muted); font-size: 13px; text-align: center; white-space: nowrap; }
 .grid tfoot .all-done, .grid .row-done.all-done { color: var(--done); }
@@ -206,13 +213,13 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .history-row .chars { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; }
 
 /* Gold */
-.gold-list { border-collapse: separate; border-spacing: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; }
-.gold-list th, .gold-list td { padding: 4px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.gold-list { border-collapse: separate; border-spacing: 0; background: var(--table); border: 1px solid var(--table-edge); border-radius: 8px; margin-bottom: 12px; }
+.gold-list th, .gold-list td { padding: 4px 12px; border-bottom: 1px solid var(--table-line); white-space: nowrap; }
 .gold-list tr:last-child > * { border-bottom: none; }
 .gold-list th { text-align: left; font-weight: 500; line-height: 1.25; }
 .gold-list th .lvl { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
 .gold-list .bank-row th { color: var(--gold); font-weight: 600; }
-.gold-list .bank-row > * { border-bottom: 2px solid var(--border); }
+.gold-list .bank-row > * { border-bottom: 2px solid var(--table-edge); }
 .count-input {
     width: 130px;
     padding: 3px 6px;
@@ -228,8 +235,16 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .count-input::placeholder { color: var(--border); font-style: italic; }
 
 /* Goals: a bar filling towards each, in the header (the current one) and on the Gold page. */
-.goal-bar { display: inline-block; flex: none; width: 120px; height: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-.goal-bar > span { display: block; height: 100%; background: var(--gold); }
+/* A later goal's bar has two fills: if it were the current goal (pale, behind) and on top of the
+   current goal (bright, in front). */
+.goal-bar { position: relative; display: inline-block; flex: none; width: 120px; height: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.goal-bar > span { position: absolute; top: 0; bottom: 0; left: 0; background: var(--gold); }
+.goal-bar > span.alone { background: var(--gold-pale); }
+.goal-progress b { font-weight: 600; }
+.goal-progress b.on-top { color: var(--gold); }
+.goal-progress b.alone { color: var(--gold-pale-text); }
+.goal-cost { display: block; font-size: 12px; color: var(--muted); text-align: right; padding-right: 7px; }
+.token-status { margin: -12px 0 20px; }
 .goal-list { border-collapse: collapse; margin-bottom: 20px; }
 .goal-list th, .goal-list td { padding: 4px 8px 4px 0; }
 .goal-list th { text-align: left; font-size: 12px; font-weight: 400; color: var(--muted); padding-right: 12px; }
@@ -238,14 +253,14 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .goal-list .goal-input:not(.count-input) { width: 200px; }
 .goal-list .goal-input:focus { outline: none; border-color: var(--gold); background: var(--bg); }
 .goal-list .goal-input::placeholder { color: var(--muted); opacity: .6; font-style: normal; }
-.goal-list tr.new-goal > * { padding-top: 10px; }
+.goal-list tr.new-goal > *, .goal-list tr.reserve > * { padding-top: 10px; }
 .goal-progress { display: flex; align-items: center; gap: 10px; }
 .goal-progress .goal-bar { width: 160px; }
 .goal-buttons { white-space: nowrap; text-align: right; }
 .goal-buttons button { padding: 2px 8px; font-size: 13px; margin-left: 4px; }
 
 /* Manage */
-.manage { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); align-items: start; gap: 20px; }
+.manage { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start; gap: 20px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .panel form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 8px; margin-bottom: 14px; }
 .field { display: flex; flex-direction: column; gap: 3px; }
@@ -267,3 +282,49 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
 .list li .grow { flex: 1; }
 .list li button { padding: 2px 8px; font-size: 13px; }
+
+/* Narrower windows: History puts each week's characters on a line of their own. */
+@media (max-width: 1000px) {
+    .history-list { grid-template-columns: auto auto auto 1fr; }
+    .history-row .chars { grid-column: 1 / -1; }
+}
+
+/* A compact header: one row on a tablet, two on a phone (the title and the views, then the total
+   and Log out). */
+@media (max-width: 900px) {
+    header { gap: 8px 12px; padding: 8px 16px; }
+    h1 { font-size: 18px; }
+    nav { gap: 4px; }
+    nav button { padding: 4px 8px; font-size: 14px; }
+    #nav-total { gap: 8px; margin-left: 0; padding-left: 0; font-size: 15px; }
+    #nav-total .goal-bar { width: 64px; }
+    #nav-total:not([hidden]) + #logout { margin-left: auto; }
+}
+@media (max-width: 380px) {
+    header { column-gap: 8px; }
+    h1 { font-size: 16px; }
+    nav button { padding: 4px 6px; font-size: 13px; }
+}
+
+/* Phones */
+@media (max-width: 640px) {
+    main { padding: 12px 16px; }
+    #week-summary { margin-left: 0; gap: 20px; }
+
+    /* History: the dates, the count and the gold, then the bar and the characters under them. */
+    .history-list { grid-template-columns: 1fr auto auto; }
+    .history-row { grid-auto-flow: dense; padding: 10px 12px; }
+    .history-row .when { white-space: normal; }
+    .history-row .bar { grid-column: 1 / -1; width: auto; }
+
+    /* Goals: the name and price on one line, the progress and buttons under them. */
+    .goal-list, .goal-list tbody { display: block; }
+    .goal-list tr { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 6px 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .goal-list th, .goal-list td, .goal-list tr.new-goal > *, .goal-list tr.reserve > * { padding: 0; }
+    .goal-list tr > td:nth-child(n+4) { grid-column: 2 / -1; }
+    .goal-list .goal-input:not(.count-input) { width: 100%; }
+    .goal-list .count-input { width: 110px; }
+    .goal-buttons { text-align: left; }
+    .goal-buttons button:first-child { margin-left: 0; }
+    .gold-list td.muted { white-space: normal; }
+}
