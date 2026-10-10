@@ -243,8 +243,7 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .goal-progress b { font-weight: 600; }
 .goal-progress b.on-top { color: var(--gold); }
 .goal-progress b.alone { color: var(--gold-pale-text); }
-.goal-cost { display: block; font-size: 12px; color: var(--muted); text-align: right; padding-right: 7px; }
-.token-status { margin: -12px 0 20px; }
+.goal-cost { display: block; font-size: 12px; color: var(--muted); text-align: right; padding-right: 7px; white-space: nowrap; }
 .goal-list { border-collapse: collapse; margin-bottom: 20px; }
 .goal-list th, .goal-list td { padding: 4px 8px 4px 0; }
 .goal-list th { text-align: left; font-size: 12px; font-weight: 400; color: var(--muted); padding-right: 12px; }
@@ -255,9 +254,62 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .goal-list .goal-input::placeholder { color: var(--muted); opacity: .6; font-style: normal; }
 .goal-list tr.new-goal > *, .goal-list tr.reserve > * { padding-top: 10px; }
 .goal-progress { display: flex; align-items: center; gap: 10px; }
+.goal-progress > .muted { min-width: 15em; }
 .goal-progress .goal-bar { width: 160px; }
 .goal-buttons { white-space: nowrap; text-align: right; }
 .goal-buttons button { padding: 2px 8px; font-size: 13px; margin-left: 4px; }
+.goal-eta { display: block; color: var(--text); }
+.goal-cost.dip { color: var(--done); opacity: .85; }
+.goal-average { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin: -12px 0 20px; }
+
+/* WoW Token: its price, the Battle.net Balance, the price history and when it's usually lowest. */
+.token { max-width: 1000px; margin-bottom: 24px; padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+.token h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+.token .summary { flex-wrap: wrap; gap: 12px 32px; margin-bottom: 12px; }
+.token .summary .count-input { width: 120px; margin-left: -7px; font-size: 20px; font-weight: 700; text-align: left; padding: 0 6px; }
+.token-refresh { margin-left: auto; align-self: center; }
+.token-good { margin: 0 0 12px; color: var(--done); font-weight: 600; }
+.token-ranges { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.token-ranges button { padding: 2px 10px; font-size: 13px; }
+.token-ranges button.active { border-color: var(--gold); color: var(--gold); }
+.token-stats b, .token-patterns b { color: var(--text); font-weight: 600; }
+
+/* The plot is an SVG stretched to the width (so its strokes don't scale); labels, crosshair and
+   tooltip are HTML on top of it. */
+.token-chart { display: grid; grid-template-columns: auto minmax(0, 1fr); margin: 8px 0 20px; }
+.token-y { position: relative; width: 44px; height: 200px; }
+.token-y span { position: absolute; right: 8px; transform: translateY(-50%); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.token-plot { position: relative; height: 200px; background: var(--table); border: 1px solid var(--table-line); border-radius: 6px; cursor: crosshair; }
+.token-plot svg { display: block; width: 100%; height: 100%; }
+.token-plot line, .token-plot path { vector-effect: non-scaling-stroke; }
+.token-plot line.grid { stroke: var(--border); stroke-width: 1; }
+.token-plot line.good { stroke: var(--done); stroke-width: 1; opacity: .7; }
+.token-plot path.area { fill: var(--gold); fill-opacity: .1; stroke: none; }
+.token-plot path.line { fill: none; stroke: var(--gold); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.token-plot .good-label { position: absolute; right: 6px; transform: translateY(-50%); padding: 0 4px; font-size: 11px; color: var(--done); background: var(--table); border-radius: 4px; pointer-events: none; }
+.token-plot .cross, .token-plot .dot, .token-plot .tip { position: absolute; display: none; pointer-events: none; }
+.token-plot.hovering .cross, .token-plot.hovering .dot, .token-plot.hovering .tip { display: block; }
+.token-plot .cross { top: 0; bottom: 0; width: 1px; background: var(--muted); }
+.token-plot .dot { width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 0 2px var(--table); }
+.token-plot .tip { top: 8px; margin-left: 10px; padding: 4px 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; white-space: nowrap; }
+.token-plot .tip.flip { margin-left: -10px; transform: translateX(-100%); }
+.token-plot .tip b { display: block; font-size: 14px; }
+.token-plot .tip span { color: var(--muted); }
+.token-x { grid-column: 2; position: relative; height: 20px; }
+.token-x span { position: absolute; top: 4px; transform: translateX(-50%); font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+/* By hour and by weekday: a bar per slot, up from the middle line when the price is usually
+   higher, down when it's lower. */
+.token-patterns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px 32px; }
+.token-patterns p { margin: 0 0 8px; }
+.pattern { display: flex; gap: 2px; height: 64px; margin-bottom: 20px; }
+.pattern-col { position: relative; flex: 1; max-width: 24px; cursor: help; }
+.pattern-col::before { content: ""; position: absolute; left: -1px; right: -1px; top: 50%; border-top: 1px solid var(--border); }
+.pattern-col span { position: absolute; left: 0; right: 0; }
+.pattern-col span.higher { bottom: 50%; background: var(--gold-pale); border-radius: 3px 3px 0 0; }
+.pattern-col span.lower { top: 50%; background: var(--done); border-radius: 0 0 3px 3px; }
+.pattern-col:hover span { filter: brightness(1.35); }
+.pattern-col i { position: absolute; top: 100%; left: 0; margin-top: 3px; font-size: 11px; font-style: normal; color: var(--muted); white-space: nowrap; }
 
 /* Manage */
 .manage { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: start; gap: 20px; }
@@ -325,6 +377,8 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
     .goal-list .goal-input:not(.count-input) { width: 100%; }
     .goal-list .count-input { width: 110px; }
     .goal-buttons { text-align: left; }
+    .goal-progress > .muted { min-width: 0; }
+    .goal-progress .goal-bar { width: 96px; }
     .goal-buttons button:first-child { margin-left: 0; }
     .gold-list td.muted { white-space: normal; }
 }

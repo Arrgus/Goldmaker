@@ -15,7 +15,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
   - `php tests/api.test.php` runs end-to-end tests of `api.php`. It starts `php -S` from a temp copy of the site with a fresh data folder, so it never touches real data, `config.local.php` or Battle.net. Needs PHP 8.1+ with curl.
   - `node tests/client.test.js` runs `app.js` against a stub DOM and a simulated server. It checks the request queue, the sync, logging out and error handling. Needs Node 18+.
   - Syntax only: `php -l api.php` and `node --check app.js`. There's no linter or bundler.
-  - **Not covered:** the real armory sync, Apache (the `.htaccess` rules and headers) and real browser behaviour (form validation, `<select>` values, layout, and keeping the loot fields' focus and typing across re-renders). Check those by hand, for example with the Docker command under Deployment.
+  - **Not covered:** the real armory sync and token price lookups, the token logger loop in the container, Apache (the `.htaccess` rules and headers) and real browser behaviour (form validation, `<select>` values, layout, and keeping the loot fields' focus and typing across re-renders). Check those by hand, for example with the Docker command under Deployment.
 - **Running it locally:**
   - Docker is closest to the server.
   - `php -S` also works, but it ignores `.htaccess`, so the data-folder block and the security headers don't apply.
@@ -28,16 +28,18 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 - **Files served:** only the files listed in the `COPY` line go into the web root. **A new site file must be added to that line.** `tests/` isn't deployed.
 - **Data:** `GOLDMAKER_DATA_DIR=/data` sits outside the web root. `/data` must be a persistent volume, and the entrypoint `chown`s it to `www-data` at startup.
   - Besides `goldmaker.json`, it holds `goldmaker.lock`, `login-failures.json` and the armory caches (`blizzard-token.json`, `realm-index.json`).
+  - `token-prices.csv` is the WoW Token price log (see Armory sync). It isn't in `goldmaker.json`, so the export and import don't include it; only a backup of the volume keeps it.
   - It also holds `backup-<timestamp>.json` files from imports. These are the only backups the app makes itself.
   - `goldmaker.json.tmp` only exists for a moment during a save.
 - **If the app reports a damaged data file,** nothing has been changed. Replace `/data/goldmaker.json` with a good copy: a `backup-*.json`, or a backup of the volume.
 - **Env vars on the server:** `GOLDMAKER_PASSWORD`, plus `BLIZZARD_CLIENT_ID`, `BLIZZARD_CLIENT_SECRET` and `BLIZZARD_REGION` (default `eu`) for the armory sync. `config()` in `api.php` reads each env var first, then the matching key in `config.local.php`.
+- **Token price logger:** `docker/entrypoint.sh` starts a loop, as `www-data` (via `su`), that runs `php api.php log-token-price` every 5 minutes, so prices are logged while no page is open. It exits at once without Battle.net keys; its errors go to the container log.
 - **HTTPS:** Traefik terminates TLS. `api.php` trusts `X-Forwarded-Proto` to decide whether the cookie gets the `Secure` flag.
 - **Local test:** `docker build -t goldmaker . && docker run -p 8080:80 -e GOLDMAKER_PASSWORD=… -v <dir>:/data goldmaker`
 
 ## Architecture
 
-**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `gold`, `goal`, `reserve`, `import`, `sync`, `tokenPrice`).
+**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `gold`, `goal`, `reserve`, `balance`, `import`, `sync`, `tokenPrice`, `tokenHistory`). Run from the command line with `log-token-price`, it logs the token price instead (see Armory sync).
 - **Auth runs before the data file is opened.**
   - There is a single shared password. The `goldmaker_session` cookie holds `expiry.hmac`, keyed by that password, so there is no server-side session storage and changing the password signs everyone out. The cookie is renewed once it's more than halfway to expiry.
   - Every action except `state` must be a POST with a JSON content type (the CSRF defence, together with the SameSite=Lax cookie).
@@ -47,7 +49,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
   - Every request holds an exclusive `flock` on `DATA_DIR/goldmaker.lock` for its whole duration, then loads the data file (`loadState`) and mutates it. Actions other than `state` save it back.
   - `saveState` writes a `.tmp` file and renames it over the data file, so a crash or full disk never leaves a half-written file. The lock lives in its own file because that rename replaces the data file.
   - A data file that exists but doesn't parse is a 500 error, never treated as empty, because the next save would overwrite it. An empty or missing file is a fresh start.
-- **Every action returns the complete new state.** The front end never patches its state locally. It replaces `state` with whatever the API returns and re-renders everything.
+- **Every action returns the complete new state.** The front end never patches its state locally. It replaces `state` with whatever the API returns and re-renders everything. The one exception is `tokenHistory`, which returns only `{history}` (see Armory sync).
 - Errors go through `fail()`, which returns `{error}` with an HTTP status code.
 - IDs are prefixed random hex (`c…` for characters, `a…` for activities), so PHP never turns them into integer array keys. Keep the prefixes. `isId()` enforces the format wherever ids come from outside: `toggle`, the import, and the completion keys checked on every load.
 
@@ -58,8 +60,14 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 - **Realm matching:** the stored realm is matched to a slug through the realm index, via `realmKey()`, which lowercases and strips everything but letters and numbers.
 - **Caching:** the OAuth token and the realm index are cached as JSON files in `DATA_DIR`.
 - **Errors:** a failure for one character is saved as `syncError` on that character. A failure of the whole sync is saved as the top-level `lastSyncError`, and `lastSync` is set either way so a broken setup isn't retried constantly. `saveCharacter` rebuilds the character, which drops `syncError`.
-- **Extra response fields:** the API response adds `armoryEnabled` and `autoSyncInterval`. They are never written to the file.
-- **WoW Token price:** the `tokenPrice` action looks up the token's Auction House price (`fetchTokenPrice`, `/data/wow/token/index` in the `dynamic` namespace, `price` in copper) the same way, before the lock. It saves it as `tokenPrice: {gold, time}`; a failure keeps the old price and is saved as `tokenPriceError`. `app.js` calls it (`autoTokenPrice`, bypassing the queue like the sync) while a goal is priced in euros and the price is older than `TOKEN_REFRESH` (1h). Not yet tried against the real API: the local config has no Battle.net keys.
+- **Extra response fields:** the API response adds `armoryEnabled`, `autoSyncInterval` and `tokenPrice`. They are never written to the file, and the export leaves them out.
+- **WoW Token price log:**
+  - `fetchTokenPrice` reads `/data/wow/token/index` (`dynamic` namespace): `price` in copper and `last_updated_timestamp` in ms, when Blizzard set it. `logTokenPrice` appends it to `DATA_DIR/token-prices.csv` as a `time,gold` line, unless that time is already logged. The file has its own `flock`; a line cut short by a crash is skipped on reading and ended before the next append.
+  - Two things log: the container's loop (`php api.php log-token-price`, see Deployment) and the `tokenPrice` action, which does it before the data lock like the sync. A failed action is saved as `tokenPriceError` (the loop only writes to the container log).
+  - The current price, `tokenPrice: {gold, time}` in every response, is the log's last line (`latestTokenPrice`, read from the end of the file). Older data files stored `tokenPrice`; `loadState` drops it and the import ignores it.
+  - `tokenHistory` (a POST like other actions) returns `{history: [[time, gold], …]}` after `since`, without touching the data file. `app.js` fetches only what it doesn't have yet (`loadTokenLog`), while the Gold page is shown and the state has a newer price than its copy.
+  - `app.js` asks for a lookup (`lookUpTokenPrice`, bypassing the queue like the sync) from the Refresh button, or on its own when goals in euros need the price and it's older than `TOKEN_REFRESH` (1h), i.e. when the loop isn't running.
+  - Not yet tried against the real API: the local config has no Battle.net keys. The loop was checked in Docker with fake keys (Battle.net refused them, as it should).
 
 **Import** (the `import` action, under Manage → Data):
 - **What it does:** replaces all data with an uploaded `goldmaker.json`, first saving the old file as `DATA_DIR/backup-<timestamp>.json`.
@@ -96,7 +104,8 @@ bank: {gold, time}|null  // gold counted in the bank, see Gold on hand below
 charGold: { "<charId>": {gold, time} }  // gold counted on each character
 goals: [{id: "g…", name, gold} | {id, name, euros}]  // what's being saved up for; the first is the current goal
 reserve: gold  // kept in the bank after buying any goal, added to every goal (default 500k)
-tokenPrice: {gold, time}|null, tokenPriceError?: string|null  // WoW Token price, for goals in euros
+balance: {euros, time}|null  // Battle.net Balance from tokens already bought, see Goals in euros
+tokenPriceError?: string|null  // the last token price lookup failed (the price itself is in token-prices.csv)
 lastWeek?: weekKey  // latest week a request came from
 lastSync?: unix time, lastSyncError?: string|null
 ```
@@ -134,15 +143,22 @@ lastSync?: unix time, lastSyncError?: string|null
     - **Reserve:** `reserve` gold must stay in the bank after buying any goal, so it's added to every goal's cost (`reserve` action, empty means none).
     - **Progress** (`goalsProgress`): the current goal needs its cost plus the reserve. A later goal shows two measures, as two fills of one bar and two numbers in matching colours. *On its own* (pale, behind) is how far the gold goes if it were the current goal. *On top* (bright, in front) is how far the gold beyond the current goal and the reserve goes towards it; its "to go" is what both goals and the reserve need together. On top can never be ahead of on its own while that's under 100%. Each later goal is measured against the current one alone, not one after another.
     - **Goals in euros** are typed with € or "eur" in the price field (`parseGoalPrice`; "14,99 €" works). They cost whole WoW Tokens: `ceil(euros / 13)` (`TOKEN_EUROS`, the EU Balance a token gives) times `tokenPrice` (`goalCost`). Until there's a token price their progress is unknown and they're left out of the header.
+    - **Battle.net Balance:** euros from tokens already bought, typed in the WoW Token panel (`balance` action, to the cent, `null` clears; validated on load and import). `goalCost` takes it off a goal's euros before counting tokens, so a goal it covers costs 0 gold even without a price. The current goal uses it first; a later goal's *on top* figure only gets what's left, its *on its own* figure all of it. Converting Balance back to gold isn't modelled.
+    - **Weeks to go** (`weeklyAverage`, `weeksToGo`): the gold still to go divided by the average earned per week (gold plus mats, every week from the oldest with completions, like History's average), rounded up. Shown under each goal's progress; for a later goal it's the time until both it and the current goal are affordable, plus its own figure when different. The current week is left out unless "Count this week too" is ticked (per browser, `countThisWeek`).
     - **The `goal` action:** `add` appends a goal with `gold` (above 0) or `euros`. With an `id`, `remove` deletes it, `first` makes it the current one, and otherwise the `name` or price sent change, one field at a time like the loot fields; gold and euros replace each other. A goal can't be emptied, only removed. Euros are kept to the cent, and JSON stores 26.0 as 26.
     - **Older data** had a single `goal: {gold, name}`. `normalizeGoals` turns it into the goal `g0` on every load until the next save, so its id stays stable until then (the import does the same).
+- **WoW Token panel** (Gold page, under the goals): the price, a *good price* (`goodTokenPrice`: the cheapest 10% of the last 30 days, once those cover 2 days), the Balance field and Refresh.
+  - A chart of the log over 24 hours to All (per browser, `tokenRange`): an SVG stretched to the width with non-scaling strokes, HTML labels on top, a crosshair with the nearest price (`showChartPoint`), and a line at the good price. Long ranges are thinned to each bucket's lowest and highest price (`thinOut`), so dips survive.
+  - Patterns from the last 90 days, in the browser's time (`pricePattern`): each price is compared with the average within ±12 hours (by hour of the day, after 3 days of prices) or ±3.5 days (by weekday, in WoW-week order, after 14 days), so a trend doesn't count. `patternPeak` names the lowest 3-hour window and the cheapest day.
+  - Goals in euros show what their tokens would cost at the good price.
+  - The 8-week patch cycle isn't analysed; the long chart ranges are the place to spot it.
 - **Deleting** a character or activity keeps its completion history, and it still shows in the weeks whose snapshot has it. Elsewhere entries with unknown IDs are ignored when rendering.
 - **Realms** are stored as typed by the user, in the in-game style without spaces (e.g. `ColinasPardas`); they are not Blizzard API slugs. The characters are on EU realms.
 
 ## Front-end conventions
 
 - **Week page layout:** the totals sit next to the week's dates (`weekSummary`). The grid ends with Done, Gold (mats on a line of their own, since they aren't deposited) and Bank (the Deposit button, left out for weeks before `depositsFrom`). Rows are kept to two lines so the 26-odd characters fit on fewer screens. The header, the footer and the character names stay in view while scrolling (sticky `thead`, `tfoot` cells and row headers), so on desktop the grid needs no scroll box of its own (touch screens are different, see below).
-- **Hiding Naxxramas:** a checkbox next to the week's totals hides the activities with loot (`materialsOf`) and every character left with nothing visible to do, which means those below level 80. A character who can do another activity stays. The week's totals and the footer's Done, Gold and Bank still count everything, so gold not yet deposited by a hidden character still shows. The setting is per browser (`localStorage`, `readSetting`/`writeSetting`).
+- **Hiding Naxxramas:** a checkbox next to the week's totals hides the activities with loot (`materialsOf`) and every character left with nothing visible to do, which means those below level 80. A character who can do another activity stays. The week's totals and the footer's Done, Gold and Bank still count everything, so gold not yet deposited by a hidden character still shows. The setting is per browser (`localStorage`, `readSetting`/`writeSetting`), like "Count this week too" and the token chart's range.
 - **Small screens:** up to 900px the header is compact (one row on a tablet, two on a phone). Up to 1000px History puts each week's characters on their own line, and on phones each History row and each goal stacks onto several lines. The Manage panels have no minimum width beyond the screen's.
 - **Sideways scrolling:** the page itself scrolls sideways when the grid is wider than the window. `body { min-width: fit-content }` grows with it, so the header can be `position: sticky; left: 0` at `100cqw` (the window minus its scrollbar, with `html` as the query container). It stays in view sideways and scrolls away downwards. The containment stops the body background reaching the canvas, so `html` has the background too.
   - **Touch screens** (`pointer: coarse`) don't scroll a too-wide page the same way: the browser widens the layout viewport to the content (`innerWidth` becomes the grid's width) and pans the visual viewport, which sticky positioning can't follow, so the header slid away sideways. There `#grid` scrolls in a box of its own, at most `100dvh` high, and `body` drops its `min-width`, so the page is never wider than the screen. The grid's sticky header row, footer and names work inside the box. Check this kind of change in phone emulation (CDP `mobile: true` plus touch), not just a narrow desktop window.

@@ -346,6 +346,78 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     app(`state.activities = state.activities.filter(a => !a.materials); renderWeek()`);
     check('without loot activities there is no toggle', elements['#loot-toggle'].hidden);
 
+    // The Battle.net Balance pays for goals in euros first; on top of the current goal, only what it
+    // leaves over counts.
+    app(`state = { characters: [], bank: { gold: 600, time: 1 }, reserve: 0, tokenPrice: { gold: 300, time: 1 }, balance: { euros: 13, time: 1 },
+        goals: [{ id: 'g1', name: 'Sub', euros: 20 }, { id: 'g2', name: 'Game', euros: 26 }] }`);
+    check('the balance pays first, then whole tokens', JSON.stringify(app('goalCost(state.goals[0])')) === '{"gold":300,"tokens":1,"fromBalance":13}',
+        JSON.stringify(app('goalCost(state.goals[0])')));
+    check('a later goal only gets the balance the current one leaves', progress(600) === '[[[100,0],null],[[100,0],[50,300]]]', progress(600));
+    app('state.tokenPrice = null');
+    check('a goal the balance covers costs nothing, even without a token price', JSON.stringify(app('goalCost({ euros: 13 })'))
+        === '{"gold":0,"tokens":0,"fromBalance":13}', JSON.stringify(app('goalCost({ euros: 13 })')));
+    check('euros read with or without the €', JSON.stringify([app('parseEuros("13")'), app('parseEuros(" 14,99 € ")'), app('parseEuros("")')]) === '[13,14.99,null]'
+        && Number.isNaN(app('parseEuros("x")')));
+
+    // Weeks to go use the average of the finished weeks, or of every week with countThisWeek.
+    app(`state = { characters: [{ id: 'c1', level: 90 }], activities: [{ id: 'a1', minLevel: 90, gold: 1000 }], snapshots: {}, deposits: {},
+        completions: { [shiftWeek(currentWeekKey(), -2)]: { c1: { a1: 3000 } }, [shiftWeek(currentWeekKey(), -1)]: { c1: { a1: 1000 } },
+            [currentWeekKey()]: { c1: { a1: 500 } } } }; countThisWeek = false`);
+    check('the average leaves out the current week', JSON.stringify(app('weeklyAverage()')) === '{"gold":2000,"weeks":2}', JSON.stringify(app('weeklyAverage()')));
+    check('weeks to go round up', app('weeksToGo(5000, weeklyAverage())') === 3 && app('weeksToGo(0, weeklyAverage())') === null
+        && app('weeksToGo(5000, null)') === null);
+    app('countThisWeek = true');
+    check('the switch counts the current week too', JSON.stringify(app('weeklyAverage()')) === '{"gold":1500,"weeks":3}', JSON.stringify(app('weeklyAverage()')));
+    app('countThisWeek = false');
+
+    // The token price log: when it's usually lowest, what a good price is, and the chart.
+    app(`tokenLog = []; {
+        const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - 6);
+        for (let t = start / 1000; t < start / 1000 + 5 * DAY; t += 1200) {
+            tokenLog.push([t, new Date(t * 1000).getHours() === 6 ? 294000 : 300000]);
+        }
+    }`);
+    const hours = app('pricePattern(tokenLog, 24, d => d.getHours(), DAY / 2)');
+    check('the hourly pattern finds the hour the price dips', hours.indexOf(Math.min(...hours)) === 6 && Math.min(...hours) < -0.015,
+        JSON.stringify(hours.map(h => +h.toFixed(4))));
+    check('the lowest 3 hours include the dip', [4, 5, 6].includes(app('patternPeak(pricePattern(tokenLog, 24, d => d.getHours(), DAY / 2), 3, -1).from')));
+    check('the weekly pattern waits for more days', app('pricePattern(tokenLog, 7, weekdaySlot, 3.5 * DAY)') === null);
+    app(`state = { characters: [], goals: [{ id: 'g1', name: 'Sub', euros: 26 }], reserve: 0, armoryEnabled: true,
+        tokenPrice: { gold: 300000, time: tokenLog.at(-1)[0] } }; tokenRange = '7'; renderGold()`);
+    const gold = elements['#gold'].innerHTML;
+    check('the token panel shows the chart and the hourly pattern', gold.includes('class="token-plot"') && gold.includes('Usually lowest around <b>')
+        && gold.includes('id="token-refresh"') && gold.includes('Shows after 2 weeks of prices'));
+
+    app(`tokenLog = Array.from({ length: 10 }, (_, i) => [Math.floor(Date.now() / 1000) - 3 * DAY + i * 7 * 3600, (i + 1) * 100])`);
+    check('a good price is the cheapest 10% of 30 days', app('goodTokenPrice()') === 200, app('goodTokenPrice()'));
+    app(`tokenLog = tokenLog.slice(0, 2)`);
+    check('a good price needs 2 days of prices', app('goodTokenPrice()') === null, app('goodTokenPrice()'));
+    const thinned = app(`thinOut(Array.from({ length: 1000 }, (_, i) => [i, i === 517 ? 1 : 500 + (i % 7)]), 50)`);
+    check('thinning the chart keeps the dips', thinned.length <= 100 && thinned.some(e => e[1] === 1), thinned.length);
+
+    // The page asks only for the log entries it doesn't have, once the state has a newer price.
+    await sleep(20); // the requests the renders above started
+    log.length = 0;
+    server.fake.tokenHistory = () => json({ history: [[2000, 310000]] });
+    context.saved = saved;
+    elements.main.hidden = false; // signed in, on the Gold page
+    app(`state = { ...saved, tokenPrice: { gold: 310000, time: 2000 } }; tokenLog = [[1000, 300000]]; loadTokenLog()`);
+    await sleep(20);
+    check('the log is fetched from the last entry on', JSON.stringify(log.find(e => e.action === 'tokenHistory')?.body) === '{"since":1000}'
+        && JSON.stringify(app('tokenLog')) === '[[1000,300000],[2000,310000]]', JSON.stringify(app('tokenLog')));
+    log.length = 0;
+    app('loadTokenLog()');
+    await sleep(20);
+    check("an up-to-date log isn't fetched again", !log.some(e => e.action === 'tokenHistory'));
+    delete server.fake.tokenHistory;
+
+    // Refresh looks the price up straight away.
+    log.length = 0;
+    app('lookUpTokenPrice()');
+    await sleep(50);
+    check('Refresh asks the server for the price, then the state', log.some(e => e.event === 'send' && e.action === 'tokenPrice')
+        && log.some(e => e.event === 'send' && e.action === 'state') && app('tokenPriceRun') === null);
+
     context.saved = saved;
     app('state = saved');
 

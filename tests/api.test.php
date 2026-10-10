@@ -460,8 +460,8 @@ check('the token price needs the Battle.net API', $status === 400 && str_contain
 $export = json_decode(file_get_contents($dataFile), true);
 $export['tokenPrice'] = ['gold' => 364300, 'time' => 1760000000];
 [$status, $state] = call('import', ['data' => $export]);
-check('an import keeps the goals, the reserve and the token price', $status === 200 && $state['goals'] === $export['goals']
-    && $state['reserve'] === 400000 && $state['tokenPrice'] === $export['tokenPrice'], $status);
+check('an import keeps the goals and the reserve, but not an old stored token price', $status === 200 && $state['goals'] === $export['goals']
+    && $state['reserve'] === 400000 && $state['tokenPrice'] === null && !isset(json_decode(file_get_contents($dataFile), true)['tokenPrice']), $status);
 $before = file_get_contents($dataFile);
 $bothPrices = $export;
 $bothPrices['goals'][0]['euros'] = 10;
@@ -492,6 +492,60 @@ check('its id holds until the next save', $state['goals'][0]['name'] === 'Rename
 $old['goal']['gold'] = 0;
 [, $state] = call('import', ['data' => $old]);
 check('an older empty goal is no goal', $state['goals'] === [], $state['goals']);
+
+// ---------- WoW Token price log and Battle.net Balance ----------
+
+$tokenLog = "$dataDir/token-prices.csv";
+$old = json_decode(file_get_contents($dataFile), true);
+$old['tokenPrice'] = ['gold' => 364300, 'time' => 1760000000];
+file_put_contents($dataFile, json_encode($old));
+[, $state] = call('state');
+check('an older stored token price is dropped', $state['tokenPrice'] === null, $state['tokenPrice']);
+// The last line is cut short, as by a crash mid-write; garbage lines are skipped.
+file_put_contents($tokenLog, "1760000000,300000\nnot a price\n1760001200,310000\n1760002400,305000\n17600036");
+[, $state] = call('state');
+check('the token price is the last whole line of the log', $state['tokenPrice'] === ['gold' => 305000, 'time' => 1760002400], $state['tokenPrice']);
+file_put_contents($tokenLog, "\n1760003600,299000\n", FILE_APPEND); // as logTokenPrice ends the cut line
+[, $state] = call('state');
+check('a new line in the log is the new price', $state['tokenPrice'] === ['gold' => 299000, 'time' => 1760003600], $state['tokenPrice']);
+[$status, $reply] = call('tokenHistory', []);
+check('the price history skips lines that are not prices', $status === 200
+    && $reply['history'] === [[1760000000, 300000], [1760001200, 310000], [1760002400, 305000], [1760003600, 299000]], $reply);
+[, $reply] = call('tokenHistory', ['since' => 1760001200]);
+check('the price history can start after a time', $reply['history'] === [[1760002400, 305000], [1760003600, 299000]], $reply);
+[$status] = call('tokenHistory');
+check('the price history is a POST like other actions', $status === 405, $status);
+[$status] = call('tokenHistory', [], signedIn: false);
+check('the price history needs a session', $status === 401, $status);
+
+$cli = function (string ...$args) use ($dataDir, $tmp): int {
+    $proc = proc_open([PHP_BINARY, "$tmp/site/api.php", ...$args], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, "$tmp/site",
+        ['GOLDMAKER_DATA_DIR' => $dataDir, 'BLIZZARD_CLIENT_ID' => '', 'BLIZZARD_CLIENT_SECRET' => ''] + getenv());
+    stream_get_contents($pipes[1]);
+    stream_get_contents($pipes[2]);
+    return proc_close($proc);
+};
+check('the price logger needs its command', $cli() === 2);
+$before = file_get_contents($tokenLog);
+check('without the Battle.net API the price logger does nothing', $cli('log-token-price') === 0
+    && file_get_contents($tokenLog) === $before);
+
+[, $state] = call('balance', ['euros' => '13.456']);
+check('the balance is kept to the cent, with the time it was typed in', $state['balance']['euros'] === 13.46 && is_int($state['balance']['time']), $state['balance']);
+foreach ([['euros' => -1], ['euros' => 'lots'], ['euros' => 1e9]] as $bad) {
+    [$status] = call('balance', $bad);
+    check('the balance ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+$export = json_decode(file_get_contents($dataFile), true);
+[$status, $state] = call('import', ['data' => $export]);
+check('an import keeps the balance', $status === 200 && $state['balance'] === $export['balance'], $state['balance'] ?? null);
+$before = file_get_contents($dataFile);
+$badBalance = $export;
+$badBalance['balance']['euros'] = -2;
+[$status] = call('import', ['data' => $badBalance]);
+check('an import with a bad balance is refused', $status === 400 && file_get_contents($dataFile) === $before, $status);
+[, $state] = call('balance', ['euros' => null]);
+check('null clears the balance', $state['balance'] === null, $state['balance']);
 
 // ---------- Signing out ----------
 

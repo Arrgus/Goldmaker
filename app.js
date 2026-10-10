@@ -39,6 +39,10 @@ function writeSetting(key, value) {
 }
 
 let hideLoot = readSetting('goldmaker.hideLoot') === '1';
+// Whether the average behind "weeks to go" counts the current week (see weeklyAverage).
+let countThisWeek = readSetting('goldmaker.countThisWeek') === '1';
+// How many days the WoW Token chart shows, or "all".
+let tokenRange = readSetting('goldmaker.tokenRange') || '7';
 
 // ---------- Weeks ----------
 // A week starts on Wednesday at 04:00 local time and is keyed by that Wednesday's date.
@@ -233,6 +237,12 @@ function fmtGold(n) {
     return `${Math.round(n).toLocaleString()}g`;
 }
 
+// A moment in the last weeks, e.g. "Tue 14 Oct, 07:20".
+function fmtWhen(time) {
+    return new Date(time * 1000).toLocaleString(undefined,
+        { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
 function fmtShort(n) {
     if (n >= 1e6) return `${+(n / 1e6).toFixed(2)}M`;
     return n < 1000 ? String(n) : `${+(n / 1000).toFixed(2)}k`;
@@ -314,6 +324,7 @@ function setSignedIn(signedIn) {
     if (!signedIn && wasSignedIn) {
         // Don't leave the previous data sitting in the page.
         state = { characters: [], activities: [], completions: {}, deposits: {}, bank: null, charGold: {} };
+        tokenLog = null;
         render();
     }
     if (!signedIn) $('#login-form').elements.password.focus();
@@ -563,10 +574,8 @@ function setHtml(el, html) {
 // once everything is banked, a mark that undoes the latest deposit.
 function depositButton(c, { deposits, deposited, pending }) {
     if (!tracksDeposits(viewedWeek)) return '';
-    const when = t => new Date(t * 1000).toLocaleString(undefined,
-        { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
     const history = deposits.length
-        ? 'Deposited:' + deposits.map(d => `\n${fmtGold(d.gold)} on ${when(d.time)}`).join('') : '';
+        ? 'Deposited:' + deposits.map(d => `\n${fmtGold(d.gold)} on ${fmtWhen(d.time)}`).join('') : '';
     if (pending) {
         const label = `Deposit ${deposited ? '+' : ''}${fmtShort(pending)}`;
         const title = `${esc(c.name)}: mark ${fmtGold(pending)} as deposited in the bank${history ? '\n\n' + history : ''}`;
@@ -576,17 +585,25 @@ function depositButton(c, { deposits, deposited, pending }) {
     return `<button class="deposit banked" data-undo-deposit="${c.id}" title="${history}\n\nClick to undo the last deposit">Banked ✔</button>`;
 }
 
-function renderHistory() {
+// Every week from the current one back to the oldest with anything done, newest first.
+function historyWeeks() {
     const current = currentWeekKey();
     // The server rejects weeks before 2004 (isWeekKey in api.php); skipping them here too keeps
     // damaged data from making the loop below endless (toKey doesn't pad years under 1000).
-    const keys = Object.keys(state.completions).filter(k => k >= '2004' && k <= current).sort();
+    const keys = Object.keys(state.completions || {}).filter(k => k >= '2004' && k <= current).sort();
     const oldest = keys[0] || current;
-
-    let rows = '', allGold = 0, pastGold = 0, pastWeeks = 0, allPending = 0;
+    const weeks = [];
     for (let k = current; k >= oldest; k = shiftWeek(k, -1)) {
-        const s = weekStats(k);
-        const earned = s.gold + s.mats;
+        const stats = weekStats(k);
+        weeks.push({ week: k, stats, earned: stats.gold + stats.mats });
+    }
+    return weeks;
+}
+
+function renderHistory() {
+    const current = currentWeekKey();
+    let rows = '', allGold = 0, pastGold = 0, pastWeeks = 0, allPending = 0;
+    for (const { week: k, stats: s, earned } of historyWeeks()) {
         allGold += earned;
         allPending += s.pending;
         if (k !== current) {
@@ -648,36 +665,64 @@ function countField(id, count, attrs, title) {
 const TOKEN_EUROS = 13;
 const TOKEN_REFRESH = 3600; // s; the token price is looked up again after this while it's needed
 
-// What a goal costs in gold: its gold, or the tokens for its euros at the last known price.
-// gold is null while there's no price yet.
-function goalCost(goal) {
-    if (goal.euros == null) return { gold: goal.gold, tokens: null };
-    const tokens = Math.ceil(Math.round(goal.euros * 100) / (TOKEN_EUROS * 100));
+// What a goal costs in gold: its gold, or the tokens for its euros at the last known price. The
+// Battle.net Balance from tokens already bought (euros) pays for what it can first. gold is null
+// while there's no price yet, unless the balance covers it all.
+function goalCost(goal, balance = state.balance?.euros || 0) {
+    if (goal.euros == null) return { gold: goal.gold, tokens: null, fromBalance: 0 };
+    const cents = Math.round(goal.euros * 100);
+    const fromBalance = Math.min(cents, Math.round(balance * 100));
+    const tokens = Math.ceil((cents - fromBalance) / (TOKEN_EUROS * 100));
     const price = state.tokenPrice?.gold;
-    return { gold: price ? tokens * price : null, tokens };
+    return { gold: !tokens ? 0 : price ? tokens * price : null, tokens, fromBalance: fromBalance / 100 };
 }
 
 // Progress towards each goal. Every goal also needs the reserve to stay in the bank once it's
 // bought. The first goal is the current one. A later one shows two things: how far the gold goes
 // if it were the current goal (alone), and how far the gold beyond the current goal goes towards
 // it (onTop), whose "left" is what the current goal and this one need together. Either is null
-// when a cost isn't known yet (a goal in euros before the token price is in).
+// when a cost isn't known yet (a goal in euros before the token price is in). On top of the current
+// goal, only the Battle.net Balance it leaves over counts.
 function goalsProgress(total) {
     const reserve = state.reserve || 0;
+    const balance = state.balance?.euros || 0;
     const pct = (have, need) => need > 0 ? Math.max(0, Math.min(100, Math.floor((have / need) * 100))) : 100;
-    const goals = (state.goals || []).map(goal => ({ goal, ...goalCost(goal) }));
+    const goals = (state.goals || []).map(goal => ({ goal, ...goalCost(goal, balance) }));
     const current = goals[0];
+    const balanceLeft = Math.max(0, balance - (current?.fromBalance || 0));
     return goals.map((g, i) => {
         if (g.gold == null) return { ...g, alone: null, onTop: null };
         const need = g.gold + reserve;
         const alone = { need, pct: pct(total, need), left: Math.max(0, need - total) };
-        const onTop = !i || current.gold == null ? null : {
-            pct: pct(total - current.gold - reserve, g.gold),
-            left: Math.max(0, current.gold + g.gold + reserve - total),
+        const extra = i ? goalCost(g.goal, balanceLeft).gold : null;
+        const onTop = !i || current.gold == null || extra == null ? null : {
+            pct: pct(total - current.gold - reserve, extra),
+            left: Math.max(0, current.gold + extra + reserve - total),
         };
         return { ...g, alone, onTop };
     });
 }
+
+// Gold earned per week on average (gold plus mats), for how long a goal will take. Like History's
+// average, only finished weeks count: the current one is usually far from done. countThisWeek adds
+// it, once it's as good as done. Null before there's a week to count.
+function weeklyAverage() {
+    const weeks = historyWeeks();
+    const counted = countThisWeek ? weeks : weeks.slice(1);
+    if (!counted.length) return null;
+    return { gold: counted.reduce((sum, w) => sum + w.earned, 0) / counted.length, weeks: counted.length };
+}
+
+// How many weeks of average earnings the gold still to go takes: null when it's reached or there's
+// no average to go by.
+function weeksToGo(left, average) {
+    return left > 0 && average?.gold > 0 ? Math.ceil(left / average.gold) : null;
+}
+
+function fmtWeeks(n) {
+    return `≈ ${n} week${n === 1 ? '' : 's'}`;
+}
+
 
 function goalName(goal, i) {
     return goal.name || (i ? 'Later goal' : 'Current goal');
@@ -694,6 +739,14 @@ function fmtEuros(euros) {
     return `${Number.isInteger(euros) ? euros : euros.toFixed(2)}€`;
 }
 
+// An amount in euros, with or without the €: "13", "14,99 €", "25 eur". Empty is null, garbage NaN.
+function parseEuros(str) {
+    const s = str.trim().toLowerCase().replace(/€|eur|\s/g, '');
+    if (s === '') return null;
+    const m = s.match(/^(\d+)(?:[.,](\d{1,2}))?$/);
+    return m ? Number(`${m[1]}.${m[2] || 0}`) : NaN;
+}
+
 // A goal's price: gold as parsePrice reads it, or euros when marked with € or "eur" ("25€",
 // "14,99 €"). null when it isn't one: a goal can't be emptied, only removed.
 function parseGoalPrice(str) {
@@ -702,8 +755,7 @@ function parseGoalPrice(str) {
         const gold = parsePrice(s);
         return gold > 0 ? { gold } : null;
     }
-    const m = s.replace(/€|eur|\s/g, '').match(/^(\d+)(?:[.,](\d{1,2}))?$/);
-    const euros = m ? Number(`${m[1]}.${m[2] || 0}`) : 0;
+    const euros = parseEuros(s);
     return euros > 0 ? { euros } : null;
 }
 
@@ -712,12 +764,15 @@ function renderGold() {
     const counted = state.bank || state.characters.some(c => state.charGold?.[c.id]);
     const goals = goalsProgress(total);
     const current = goals[0];
+    const average = goals.length ? weeklyAverage() : null;
+    const currentWeeks = current?.alone && weeksToGo(current.alone.left, average);
     $('#nav-total').hidden = !counted && !current;
     $('#nav-total').innerHTML = `<span>${fmtGold(total)}</span>`
         + (current?.alone ? `${progressBar(current.alone.pct)}<span class="goal-pct">${current.alone.pct}% of ${fmtShort(current.alone.need)}</span>` : '');
     $('#nav-total').title = current?.alone
         ? `${goalName(current.goal, 0)}: ${fmtGold(total)} of ${fmtGold(current.alone.need)}, `
-            + (current.alone.left ? `${fmtGold(current.alone.left)} to go` : 'reached') + '. Click to update.'
+            + (current.alone.left ? `${fmtGold(current.alone.left)} to go${currentWeeks ? `, ${fmtWeeks(currentWeeks)}` : ''}` : 'reached')
+            + '. Click to update.'
         : 'All your gold: the bank plus every character. Click to update it.';
 
     const since = depositedSinceCount();
@@ -740,32 +795,71 @@ function renderGold() {
             <div><span class="muted">In the bank</span><b class="count">${fmtGold(bank)}</b></div>
             <div><span class="muted">On characters</span><b class="count">${fmtGold(chars)}</b></div>
         </div>
-        <table class="goal-list">${goals.map(goalRow).join('')}${newGoalRow(goals.length)}${reserveRow()}</table>
-        ${tokenStatus()}
+        <table class="goal-list">${goals.map((g, i) => goalRow(g, i, average)).join('')}${newGoalRow(goals.length)}${reserveRow()}</table>
+        ${goals.length ? averageLine(average) : ''}
+        ${tokenSection()}
         <table class="gold-list">${rows}</table>
         <p class="muted">Type in the gold as the game shows it (1,234,567, 250k or 1.2m). Enter or ↓ moves to the next field,
             Escape undoes the typing, and an empty field means not counted.</p>`);
+    loadTokenLog();
 }
 
-// A goal's row: its name and price, which save when they're left, and its progress.
-function goalRow({ goal, gold, tokens, alone, onTop }, i) {
+// A goal's row: its name and price, which save when they're left, its progress and how many
+// weeks it's likely to take.
+function goalRow({ goal, gold, tokens, fromBalance, alone, onTop }, i, average) {
     const ids = `data-id="${goal.id}"`;
     const price = goal.euros == null ? goal.gold.toLocaleString('en-US') : fmtEuros(goal.euros);
-    const cost = tokens == null ? ''
-        : `<span class="goal-cost">${tokens} token${tokens === 1 ? '' : 's'}${gold == null ? '' : ` = ${fmtGold(gold)}`}</span>`;
     return `<tr${i ? '' : ' class="current"'}><th>${i ? 'Later' : 'Current'}</th>`
         + `<td><input class="goal-input" id="goal-name-${goal.id}" ${ids} data-field="name" value="${esc(goal.name)}"`
         + ` placeholder="${goalName({}, i)}" autocomplete="off"></td>`
         + `<td><input class="goal-input count-input" id="goal-gold-${goal.id}" ${ids} data-field="gold" value="${price}"`
-        + ` inputmode="decimal" autocomplete="off" title="Gold, or a real-money price in euros (e.g. 25€)">${cost}</td>`
-        + `<td>${goalProgressCell(alone, onTop)}</td>`
+        + ` inputmode="decimal" autocomplete="off" title="Gold, or a real-money price in euros (e.g. 25€)">${goalCostNote(gold, tokens, fromBalance)}</td>`
+        + `<td>${goalProgressCell(alone, onTop, goalWeeks(alone, onTop, average))}</td>`
         + `<td class="goal-buttons">${i ? `<button data-goal-first="${goal.id}" title="Save up for this one now">Make current</button>` : ''}`
         + `<button class="danger" data-goal-remove="${goal.id}" title="Remove this goal">Remove</button></td></tr>`;
 }
 
+// Under a goal in euros: what the Battle.net Balance pays, the tokens for the rest at today's price,
+// and what they'd cost at a good price (see goodTokenPrice).
+function goalCostNote(gold, tokens, fromBalance) {
+    if (tokens == null) return '';
+    const lines = [];
+    if (fromBalance) lines.push(`${fmtEuros(fromBalance)} from Balance`);
+    if (tokens || !fromBalance) {
+        lines.push(`${fromBalance ? '+ ' : ''}${tokens} token${tokens === 1 ? '' : 's'}${gold == null ? '' : ` = ${fmtGold(gold)}`}`);
+    }
+    const good = goodTokenPrice();
+    const price = state.tokenPrice?.gold;
+    const dip = tokens && good && price && good < price
+        ? `<span class="goal-cost dip" title="At a good price: the cheapest 10% of the last 30 days">≈ ${fmtGold(tokens * good)} at a good price</span>` : '';
+    return lines.map(line => `<span class="goal-cost">${line}</span>`).join('') + dip;
+}
+
+// Weeks of average earnings until a goal is reached, under its progress. For a later goal, until
+// there's enough for the current goal and this one (its "on top" figure), and on its own.
+function goalWeeks(alone, onTop, average) {
+    const weeks = alone && weeksToGo((onTop || alone).left, average);
+    if (!weeks) return '';
+    const when = new Date(Date.now() + weeks * 7 * DAY * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+    const own = onTop && weeksToGo(alone.left, average);
+    const title = `At ${fmtGold(average.gold)} earned a week${onTop ? `, for ${goalName(state.goals[0], 0)} and this goal together` : ''}`;
+    return `<span class="goal-eta" title="${esc(title)}">${fmtWeeks(weeks)}${onTop ? ' for both' : ''}, around ${esc(when)}`
+        + `${own && own !== weeks ? ` · ${fmtWeeks(own)} on its own` : ''}</span>`;
+}
+
+// What "weeks to go" is based on, with the switch that counts the current week too.
+function averageLine(average) {
+    const basis = average
+        ? `Weeks to go are at ${fmtGold(average.gold)} earned a week, the average of ${average.weeks}`
+            + `${countThisWeek ? '' : ' finished'} week${average.weeks === 1 ? '' : 's'}${countThisWeek ? ' including this one' : ''}.`
+        : 'Weeks to go show once a week is finished.';
+    return `<div class="goal-average muted"><span>${basis}</span><label class="toggle">`
+        + `<input type="checkbox" id="count-this-week"${countThisWeek ? ' checked' : ''}><span>Count this week too</span></label></div>`;
+}
+
 // The current goal has one bar. A later goal's bar has both fills, and both numbers in the
 // matching colours, unless the gold beyond the current goal already covers it.
-function goalProgressCell(alone, onTop) {
+function goalProgressCell(alone, onTop, weeks) {
     if (!alone) return '<span class="muted">Waiting for the WoW Token price</span>';
     const reserve = state.reserve ? ` plus the ${fmtGold(state.reserve)} kept in the bank` : '';
     const left = p => p.left ? `${fmtGold(p.left)} to go` : 'reached ✔';
@@ -785,7 +879,7 @@ function goalProgressCell(alone, onTop) {
         bar = progressBar(onTop.pct, alone.pct);
         title = `Bright: the gold beyond ${currentName}${reserve}, towards this goal. Pale: how far the gold goes if this were the current goal.`;
     }
-    return `<div class="goal-progress" title="${esc(title)}">${bar}<span class="muted">${text}</span></div>`;
+    return `<div class="goal-progress" title="${esc(title)}">${bar}<span class="muted">${text}${weeks}</span></div>`;
 }
 
 // The fields for a new goal. It goes at the end of the list, so the first goal added is the current one.
@@ -806,16 +900,320 @@ function reserveRow() {
         + '<td colspan="2" class="muted">Added to every goal</td></tr>';
 }
 
-// The WoW Token price that goals in euros are worked out with, once there are any.
-function tokenStatus() {
-    if (!(state.goals || []).some(g => g.euros != null)) return '';
-    const price = state.tokenPrice;
-    const parts = [price ? `WoW Token: ${fmtGold(price.gold)} for ${TOKEN_EUROS}€ of Balance, checked ${ago(price.time)}`
-        : 'WoW Token price: not loaded yet'];
-    if (!state.armoryEnabled) parts.push('the Battle.net API isn\'t set up on the server');
-    if (state.tokenPriceError) parts.push(`last lookup failed: ${esc(state.tokenPriceError)}`);
-    return `<p class="muted token-status${state.tokenPriceError ? ' sync-error' : ''}">${parts.join(' · ')}</p>`;
+// ---------- WoW Token ----------
+// The server logs every price it looks up (TOKEN_LOG_FILE in api.php), every few minutes even while
+// no page is open. The Gold page shows that history and when the price usually dips, so the tokens
+// for goals in euros can be bought cheaply, along with the Battle.net Balance of tokens already bought.
+
+const DAY = 86400; // s
+let tokenLog = null; // [[time, gold], …] oldest first, from the "tokenHistory" action
+let tokenLogRun = null;
+
+// Fetches the log entries the page doesn't have yet, whenever the state has a newer price than
+// them. Only while the Gold page is shown: the log grows by a few hundred entries a day.
+function loadTokenLog() {
+    const have = tokenLog?.length ? tokenLog.at(-1)[0] : 0;
+    const showing = !$('#view-gold').hidden && !$('main').hidden;
+    if (tokenLogRun || !showing || (tokenLog && have >= (state.tokenPrice?.time || 0))) return;
+    const signOutsBefore = signOuts;
+    tokenLogRun = send('tokenHistory', { since: have }).then(({ ok, data }) => {
+        if (!ok || signOuts !== signOutsBefore || !Array.isArray(data.history)) return;
+        tokenLog = [...(tokenLog || []), ...data.history];
+        requestRender();
+    }).finally(() => { tokenLogRun = null; });
 }
+
+// The logged prices of the last `days` days (Infinity for all of them).
+function tokenWindow(days) {
+    const from = Date.now() / 1000 - days * DAY;
+    return (tokenLog || []).filter(([t]) => t >= from);
+}
+
+// What counts as a good price: the cheapest 10% of the last 30 days. Null until those cover two
+// days, too short to tell a dip from the price of the moment. Worked out once per log update.
+let goodPriceCache = { log: null, length: 0, price: null };
+
+function goodTokenPrice() {
+    if (goodPriceCache.log === tokenLog && goodPriceCache.length === tokenLog?.length) return goodPriceCache.price;
+    const recent = tokenWindow(30);
+    let price = null;
+    if (recent.length > 1 && recent.at(-1)[0] - recent[0][0] >= 2 * DAY) {
+        const prices = recent.map(e => e[1]).sort((a, b) => a - b);
+        price = prices[Math.floor(prices.length * 0.1)];
+    }
+    goodPriceCache = { log: tokenLog, length: tokenLog?.length, price };
+    return price;
+}
+
+// How far the price usually is from the price around it at each slot (an hour of the day, a day of
+// the week). Each price is compared with the average of those within halfWindow of it, so a rising
+// or falling price doesn't count, and the gaps are averaged per slot. Null while a slot has no prices.
+function pricePattern(entries, slots, slotOf, halfWindow) {
+    const sums = Array(slots).fill(0);
+    const counts = Array(slots).fill(0);
+    let lo = 0, hi = 0, sum = 0;
+    for (const [time, gold] of entries) {
+        while (hi < entries.length && entries[hi][0] <= time + halfWindow) sum += entries[hi++][1];
+        while (entries[lo][0] < time - halfWindow) sum -= entries[lo++][1];
+        const slot = slotOf(new Date(time * 1000));
+        sums[slot] += gold / (sum / (hi - lo)) - 1;
+        counts[slot]++;
+    }
+    return counts.every(Boolean) ? sums.map((s, i) => s / counts[i]) : null;
+}
+
+// The run of `width` slots (wrapping round) when the price is usually lowest (sign -1) or highest (1).
+function patternPeak(pattern, width, sign) {
+    let best = null;
+    for (let from = 0; from < pattern.length; from++) {
+        let sum = 0;
+        for (let k = 0; k < width; k++) sum += pattern[(from + k) % pattern.length];
+        if (!best || (sum / width) * sign > best.dev * sign) best = { from, dev: sum / width };
+    }
+    return best;
+}
+
+// The days of the week in the order of the WoW week, which starts on Wednesday.
+const WEEKDAYS = ['Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday', 'Monday', 'Tuesday'];
+const weekdaySlot = d => (d.getDay() + 4) % 7;
+const fmtHour = h => `${String(h % 24).padStart(2, '0')}:00`;
+
+function fmtPct(dev) {
+    return `${(Math.abs(dev) * 100).toFixed(1)}%`;
+}
+
+// A gap from the usual price in gold per token, at today's price.
+function fmtWorth(dev) {
+    const gold = state.tokenPrice?.gold;
+    return gold ? ` (≈ ${fmtGold(Math.abs(dev) * gold)} ${dev < 0 ? 'less' : 'more'})` : '';
+}
+
+// The token's price, the good price to wait for, the Battle.net Balance and the price history.
+function tokenSection() {
+    const price = state.tokenPrice;
+    const euroGoals = (state.goals || []).some(g => g.euros != null);
+    if (!state.armoryEnabled && !price && !state.balance && !euroGoals) return '';
+    const good = goodTokenPrice();
+    const balance = state.balance;
+    const notes = [];
+    if (!state.armoryEnabled) notes.push('The Battle.net API isn\'t set up on the server, so the price isn\'t looked up.');
+    if (state.tokenPriceError) notes.push(`<span class="sync-error">Last lookup failed: ${esc(state.tokenPriceError)}</span>`);
+    const refresh = state.armoryEnabled ? `<button id="token-refresh"${tokenPriceRun ? ' disabled' : ''}`
+        + ` title="Look up the price now. The server also does every few minutes.">${tokenPriceRun ? 'Refreshing…' : 'Refresh'}</button>` : '';
+    return `<section class="token">
+        <h2>WoW Token</h2>
+        <div class="summary">
+            <div><span class="muted">Price</span><b>${price ? fmtGold(price.gold) : '–'}</b>
+                <span class="muted">${price ? `for ${TOKEN_EUROS}€ of Balance, set ${ago(price.time)}` : 'not looked up yet'}</span></div>
+            <div><span class="muted">Good price</span><b class="count">${good ? `≤ ${fmtGold(good)}` : '–'}</b>
+                <span class="muted">${good ? 'the cheapest 10% of 30 days' : 'after 2 days of prices'}</span></div>
+            <div><span class="muted">Battle.net Balance</span>
+                <input class="goal-input count-input" id="token-balance" data-field="balance" value="${balance ? fmtEuros(balance.euros) : ''}"
+                    placeholder="none" inputmode="decimal" autocomplete="off" title="Balance from tokens already bought, in euros. Goals in euros use it first.">
+                <span class="muted">${balance ? `updated ${ago(balance.time)}` : 'from tokens already bought'}</span></div>
+            <div class="token-refresh">${refresh}</div>
+        </div>
+        ${price && good && price.gold <= good ? '<p class="token-good">▼ A good time to buy: the price is in the cheapest 10% of the last 30 days.</p>' : ''}
+        ${notes.length ? `<p class="muted">${notes.join(' ')}</p>` : ''}
+        ${tokenHistory(price, good)}
+    </section>`;
+}
+
+function tokenHistory(price, good) {
+    if (!tokenLog) {
+        chartView = null;
+        return price ? '<p class="muted">Loading the price history…</p>' : '';
+    }
+    if (tokenLog.length < 2) {
+        chartView = null;
+        return '<p class="muted">The price history fills in as the server logs prices, every few minutes.</p>';
+    }
+    const ranges = [['1', '24 hours'], ['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['all', 'All']];
+    const buttons = ranges.map(([days, label]) =>
+        `<button data-token-range="${days}"${days === tokenRange ? ' class="active"' : ''}>${label}</button>`).join('');
+    const entries = tokenWindow(tokenRange === 'all' ? Infinity : Number(tokenRange));
+    return `<div class="token-ranges">${buttons}</div>${rangeStats(entries, price)}${tokenChart(entries, good)}${tokenPatterns()}`;
+}
+
+function rangeStats(entries, price) {
+    if (!entries.length) return '<p class="muted">No prices were logged in this period.</p>';
+    let low = entries[0], high = entries[0], sum = 0;
+    for (const e of entries) {
+        if (e[1] < low[1]) low = e;
+        if (e[1] > high[1]) high = e;
+        sum += e[1];
+    }
+    const higher = price ? entries.filter(e => e[1] > price.gold).length : 0;
+    return `<p class="muted token-stats">Low <b>${fmtGold(low[1])}</b> on ${esc(fmtWhen(low[0]))}`
+        + ` · average <b>${fmtGold(sum / entries.length)}</b> · high <b>${fmtGold(high[1])}</b> on ${esc(fmtWhen(high[0]))}`
+        + (price ? ` · now lower than ${Math.round((higher / entries.length) * 100)}% of these prices` : '') + '</p>';
+}
+
+// The price over the chosen period. The plot is drawn in its own units and stretched to the page's
+// width; the labels, the crosshair and its tooltip are HTML on top, placed in percentages.
+const CHART_W = 720, CHART_H = 200;
+let chartView = null; // what the chart shows, for the crosshair (showChartPoint)
+
+function tokenChart(entries, good) {
+    if (entries.length < 2) {
+        chartView = null;
+        return '';
+    }
+    const t0 = entries[0][0], t1 = entries.at(-1)[0];
+    let lo = Infinity, hi = -Infinity;
+    for (const [, gold] of entries) {
+        lo = Math.min(lo, gold);
+        hi = Math.max(hi, gold);
+    }
+    const pad = (hi - lo) * 0.1 || hi * 0.02 || 1;
+    lo -= pad;
+    hi += pad;
+    chartView = { entries, t0, t1, lo, hi };
+    const x = t => ((t - t0) / (t1 - t0 || 1)) * CHART_W;
+    const y = gold => CHART_H - ((gold - lo) / (hi - lo)) * CHART_H;
+    const pct = (v, of) => `${((v / of) * 100).toFixed(2)}%`;
+    const line = thinOut(entries, 360).map(([t, gold], i) => `${i ? 'L' : 'M'}${x(t).toFixed(1)},${y(gold).toFixed(1)}`).join('');
+    const ticks = niceTicks(lo, hi, 6);
+    const showGood = good && good > lo && good < hi;
+    const { times, label } = timeTicks(t0, t1);
+    return `<div class="token-chart">
+        <div class="token-y">${ticks.map(v => `<span style="top:${pct(y(v), CHART_H)}">${fmtShort(v)}</span>`).join('')}</div>
+        <div class="token-plot">
+            <svg viewBox="0 0 ${CHART_W} ${CHART_H}" preserveAspectRatio="none" aria-hidden="true">
+                ${ticks.map(v => `<line class="grid" x1="0" x2="${CHART_W}" y1="${y(v)}" y2="${y(v)}"/>`).join('')}
+                ${showGood ? `<line class="good" x1="0" x2="${CHART_W}" y1="${y(good)}" y2="${y(good)}"/>` : ''}
+                <path class="area" d="${line}L${CHART_W},${CHART_H}L0,${CHART_H}Z"/>
+                <path class="line" d="${line}"/>
+            </svg>
+            ${showGood ? `<span class="good-label" style="top:${pct(y(good), CHART_H)}">good price</span>` : ''}
+            <div class="cross"></div><div class="dot"></div><div class="tip"></div>
+        </div>
+        <div class="token-x">${times.map(t => `<span style="left:${pct(x(t), CHART_W)}">${esc(label(t))}</span>`).join('')}</div>
+    </div>`;
+}
+
+// At most about 2 × buckets points, keeping each bucket's lowest and highest price so the dips show.
+function thinOut(entries, buckets) {
+    if (entries.length <= buckets * 2) return entries;
+    const size = entries.length / buckets;
+    const points = [];
+    for (let b = 0; b < buckets; b++) {
+        const slice = entries.slice(Math.floor(b * size), Math.floor((b + 1) * size));
+        if (!slice.length) continue;
+        let low = slice[0], high = slice[0];
+        for (const e of slice) {
+            if (e[1] < low[1]) low = e;
+            if (e[1] > high[1]) high = e;
+        }
+        points.push(...(low[0] <= high[0] ? [low, high] : [high, low]));
+    }
+    return points;
+}
+
+// Round values for the axis, about `count` of them between lo and hi.
+function niceTicks(lo, hi, count) {
+    const raw = (hi - lo) / count;
+    const magnitude = 10 ** Math.floor(Math.log10(raw));
+    const step = [1, 2, 2.5, 5, 10].map(m => m * magnitude).find(s => s >= raw);
+    const ticks = [];
+    for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) ticks.push(v);
+    return ticks;
+}
+
+// Up to 6 times for the axis, on round hours, midnights or the 1st of a month, and how to label them.
+function timeTicks(t0, t1) {
+    const hours = (t1 - t0) / 3600;
+    const step = [3, 6, 12, 24, 48, 96, 168, 336, 720, 1440, 2160, 4320].find(h => hours / h <= 6) || 8640;
+    const d = new Date(t0 * 1000);
+    d.setMinutes(0, 0, 0);
+    let next;
+    if (step < 24) {
+        d.setHours(Math.ceil(d.getHours() / step) * step);
+        next = () => d.setHours(d.getHours() + step);
+    } else if (step < 720) {
+        d.setHours(24); // the next midnight
+        next = () => d.setDate(d.getDate() + step / 24);
+    } else {
+        d.setHours(0);
+        d.setDate(1);
+        d.setMonth(d.getMonth() + 1);
+        next = () => d.setMonth(d.getMonth() + step / 720);
+    }
+    const times = [];
+    for (; d / 1000 <= t1; next()) {
+        if (d / 1000 >= t0) times.push(d / 1000);
+    }
+    const options = step < 24 ? { weekday: 'short', hour: '2-digit', minute: '2-digit' }
+        : step < 720 ? { day: 'numeric', month: 'short' } : { month: 'short', year: 'numeric' };
+    return { times, label: t => new Date(t * 1000).toLocaleString(undefined, options) };
+}
+
+// Moves the crosshair to the logged price nearest the pointer, with its price and time.
+function showChartPoint(plot, clientX) {
+    if (!chartView) return;
+    const { entries, t0, t1, lo, hi } = chartView;
+    const box = plot.getBoundingClientRect();
+    const t = t0 + Math.max(0, Math.min(1, (clientX - box.left) / box.width)) * (t1 - t0);
+    let a = 0, b = entries.length - 1; // the first price at or after t
+    while (a < b) {
+        const m = (a + b) >> 1;
+        if (entries[m][0] < t) a = m + 1; else b = m;
+    }
+    const [time, gold] = a > 0 && t - entries[a - 1][0] < entries[a][0] - t ? entries[a - 1] : entries[a];
+    const f = (time - t0) / (t1 - t0 || 1);
+    const left = `${f * 100}%`;
+    plot.querySelector('.cross').style.left = left;
+    const dot = plot.querySelector('.dot');
+    dot.style.left = left;
+    dot.style.top = `${(1 - (gold - lo) / (hi - lo)) * 100}%`;
+    const tip = plot.querySelector('.tip');
+    tip.innerHTML = `<b>${fmtGold(gold)}</b><span>${esc(fmtWhen(time))}</span>`;
+    tip.style.left = left;
+    tip.classList.toggle('flip', f > 0.6);
+    plot.classList.add('hovering');
+}
+
+// When the price is usually lower or higher: by hour of the day and by day of the week, from the
+// last 90 days, in the browser's time.
+function tokenPatterns() {
+    const recent = tokenWindow(90);
+    const span = recent.length ? (recent.at(-1)[0] - recent[0][0]) / DAY : 0;
+    const hours = span >= 3 && pricePattern(recent, 24, d => d.getHours(), DAY / 2);
+    const days = span >= 14 && pricePattern(recent, 7, weekdaySlot, 3.5 * DAY);
+    let html = '<div class="token-patterns"><div><h3>By hour of the day</h3>';
+    if (hours) {
+        const low = patternPeak(hours, 3, -1), high = patternPeak(hours, 3, 1);
+        html += `<p class="muted">Usually lowest around <b>${fmtHour(low.from)}–${fmtHour(low.from + 3)}</b>,`
+            + ` ${fmtPct(low.dev)} below the price around it${fmtWorth(low.dev)}.`
+            + ` Highest around ${fmtHour(high.from)}–${fmtHour(high.from + 3)}, ${fmtPct(high.dev)} above.</p>`
+            + patternBars(hours, i => (i % 6 ? '' : fmtHour(i)), i => `${fmtHour(i)}–${fmtHour(i + 1)}`);
+    } else {
+        html += `<p class="muted">Shows after 3 days of prices (${span.toFixed(1)} so far).</p>`;
+    }
+    html += '</div><div><h3>By day of the week</h3>';
+    if (days) {
+        const low = patternPeak(days, 1, -1), high = patternPeak(days, 1, 1);
+        html += `<p class="muted">Usually lowest on <b>${WEEKDAYS[low.from]}</b>, ${fmtPct(low.dev)} below the price around it${fmtWorth(low.dev)}.`
+            + ` Highest on ${WEEKDAYS[high.from]}, ${fmtPct(high.dev)} above.</p>`
+            + patternBars(days, i => WEEKDAYS[i].slice(0, 3), i => WEEKDAYS[i]);
+    } else {
+        html += `<p class="muted">Shows after 2 weeks of prices (${Math.floor(span)} day${Math.floor(span) === 1 ? '' : 's'} so far).</p>`;
+    }
+    return html + '</div></div>'
+        + (hours ? '<p class="muted">From the last 90 days, in your time. Each price is compared with the average price in the day'
+            + ' (or the week) around it, so a rising or falling price doesn\'t count. Point at a bar for its figures.</p>' : '');
+}
+
+// One bar per slot, up from the middle line when the price is usually higher and down when lower.
+function patternBars(pattern, label, name) {
+    const max = Math.max(...pattern.map(Math.abs)) || 1;
+    return '<div class="pattern">' + pattern.map((dev, i) => {
+        const title = `${name(i)}: usually ${fmtPct(dev)} ${dev < 0 ? 'below' : 'above'} the price around it${fmtWorth(dev)}`;
+        return `<div class="pattern-col" title="${esc(title)}"><span class="${dev < 0 ? 'lower' : 'higher'}"`
+            + ` style="height:${((Math.abs(dev) / max) * 50).toFixed(1)}%"></span><i>${label(i)}</i></div>`;
+    }).join('') + '</div>';
+}
+
 
 function listItem(type, item, inner) {
     const editing = forms[type].form.elements.id.value === item.id;
@@ -904,23 +1302,34 @@ function renderSyncStatus() {
 
 $('#sync-btn').addEventListener('click', () => sync().catch(() => {}));
 
-// The WoW Token price for goals in euros, looked up by the server (the "tokenPrice" action) while
-// there are any and the last price is older than TOKEN_REFRESH. Like the sync, it bypasses the
-// request queue and then fetches the state through it. A failure is kept in the state and shown.
+// The WoW Token price, looked up and logged by the server (the "tokenPrice" action). The server
+// logs it every few minutes on its own, so the page only asks from the Refresh button, or when goals
+// in euros need the price and the latest is older than TOKEN_REFRESH (the logger isn't running,
+// e.g. outside Docker). Like the sync, it bypasses the request queue and then fetches the state
+// through it. A failure is kept in the state and shown.
 let tokenPriceRun = null;
 let lastTokenPriceTry = 0; // ms; keeps a failing lookup from being retried every minute
 
-function autoTokenPrice() {
-    const needed = state.armoryEnabled && (state.goals || []).some(g => g.euros != null);
-    const stale = Date.now() / 1000 - (state.tokenPrice?.time || 0) > TOKEN_REFRESH;
-    if (!needed || !stale || tokenPriceRun || Date.now() - lastTokenPriceTry < 10 * 60000) return;
+function lookUpTokenPrice() {
+    if (tokenPriceRun) return tokenPriceRun;
     lastTokenPriceTry = Date.now();
     const signOutsBefore = signOuts;
     tokenPriceRun = send('tokenPrice', {}).then(reply => {
         if (signOuts !== signOutsBefore) return;
         check(reply);
         return api('state');
-    }).catch(() => {}).finally(() => { tokenPriceRun = null; });
+    }).catch(() => {}).finally(() => {
+        tokenPriceRun = null;
+        requestRender();
+    });
+    requestRender(); // shows the button as busy
+    return tokenPriceRun;
+}
+
+function autoTokenPrice() {
+    const needed = state.armoryEnabled && (state.goals || []).some(g => g.euros != null);
+    const stale = Date.now() / 1000 - (state.tokenPrice?.time || 0) > TOKEN_REFRESH;
+    if (needed && stale && Date.now() - lastTokenPriceTry >= 10 * 60000) lookUpTokenPrice();
 }
 
 // Whatever the server should refresh on its own once the state is in.
@@ -933,7 +1342,7 @@ function autoRefresh() {
 
 $('#export-btn').addEventListener('click', () => {
     if (!state) return;
-    const { armoryEnabled, autoSyncInterval, ...data } = state; // fields the API adds, never stored
+    const { armoryEnabled, autoSyncInterval, tokenPrice, ...data } = state; // fields the API adds, never stored
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
     const a = document.createElement('a');
     a.href = url;
@@ -1023,6 +1432,7 @@ document.querySelectorAll('nav button, #nav-total').forEach(btn => btn.addEventL
 function showView(name) {
     document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === name));
     document.querySelectorAll('main > section').forEach(s => s.hidden = s.id !== `view-${name}`);
+    if (name === 'gold') loadTokenLog();
 }
 
 $('#prev-week').addEventListener('click', () => { viewedWeek = shiftWeek(viewedWeek, -1); renderWeek(); });
@@ -1225,6 +1635,12 @@ $('#gold').addEventListener('focusout', e => {
         api('goal', { id, name: input.value });
         return;
     }
+    if (field === 'balance') {
+        const euros = parseEuros(input.value);
+        input.classList.toggle('invalid', Number.isNaN(euros));
+        if (!Number.isNaN(euros)) api('balance', { euros });
+        return;
+    }
     if (field === 'gold') {
         const price = parseGoalPrice(input.value);
         input.classList.toggle('invalid', !price);
@@ -1244,7 +1660,13 @@ $('#gold').addEventListener('focusout', e => {
 $('#gold').addEventListener('click', e => {
     const btn = e.target.closest('button');
     if (!btn) return;
-    if (btn.id === 'goal-add') {
+    if (btn.id === 'token-refresh') {
+        lookUpTokenPrice();
+    } else if (btn.dataset.tokenRange) {
+        tokenRange = btn.dataset.tokenRange;
+        writeSetting('goldmaker.tokenRange', tokenRange);
+        renderGold();
+    } else if (btn.id === 'goal-add') {
         addGoal();
     } else if (btn.dataset.goalFirst) {
         api('goal', { id: btn.dataset.goalFirst, first: true });
@@ -1254,6 +1676,23 @@ $('#gold').addEventListener('click', e => {
             api('goal', { id: state.goals[i].id, remove: true });
         }
     }
+});
+
+$('#gold').addEventListener('change', e => {
+    if (e.target.id !== 'count-this-week') return;
+    countThisWeek = e.target.checked;
+    writeSetting('goldmaker.countThisWeek', countThisWeek ? '1' : '0');
+    renderGold();
+});
+
+// The chart's crosshair follows the pointer to the nearest logged price.
+$('#gold').addEventListener('pointermove', e => {
+    const plot = e.target.closest('.token-plot');
+    if (plot) showChartPoint(plot, e.clientX);
+});
+$('#gold').addEventListener('pointerout', e => {
+    const plot = e.target.closest('.token-plot');
+    if (plot && !plot.contains(e.relatedTarget)) plot.classList.remove('hovering');
 });
 
 let addingGoal = false; // so a double click or a repeated Enter adds the goal once

@@ -8,6 +8,7 @@ const DATA_FILE = DATA_DIR . '/goldmaker.json';
 // saving replaces DATA_FILE with a new file (see saveState).
 const LOCK_FILE = DATA_DIR . '/goldmaker.lock';
 const FAILURES_FILE = DATA_DIR . '/login-failures.json';
+const TOKEN_LOG_FILE = DATA_DIR . '/token-prices.csv';
 
 const SESSION_COOKIE = 'goldmaker_session';
 const SESSION_TTL = 30 * 86400;
@@ -29,7 +30,7 @@ function emptyState(): array
     return [
         'characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass(),
         'deposits' => new stdClass(), 'loot' => new stdClass(), 'prices' => new stdClass(),
-        'bank' => null, 'charGold' => new stdClass(), 'goals' => [], 'reserve' => DEFAULT_RESERVE, 'tokenPrice' => null,
+        'bank' => null, 'charGold' => new stdClass(), 'goals' => [], 'reserve' => DEFAULT_RESERVE, 'balance' => null,
     ];
 }
 
@@ -387,11 +388,26 @@ function normalizeReserve(mixed $reserve): int
     return $reserve;
 }
 
-// The WoW Token's Auction House price, from the "tokenPrice" action: {gold, time}, or null before
-// the first lookup.
-function normalizeTokenPrice(mixed $price): ?array
+// Battle.net Balance from WoW Tokens already bought, typed in by hand: {euros, time}. Goals in
+// euros use it up before needing more tokens (goalCost in app.js).
+function balanceEuros(mixed $euros): float
 {
-    return $price === null ? null : goldCount($price, 'the WoW Token price');
+    if (!is_numeric($euros) || $euros < 0 || $euros > 100000) {
+        fail('Bad Battle.net Balance');
+    }
+    return round((float) $euros, 2);
+}
+
+function normalizeBalance(mixed $balance): ?array
+{
+    if ($balance === null) {
+        return null;
+    }
+    $euros = is_array($balance) ? ($balance['euros'] ?? null) : null;
+    if (!(is_int($euros) || is_float($euros)) || !is_int($balance['time'] ?? null)) {
+        fail('Bad Battle.net Balance');
+    }
+    return ['euros' => balanceEuros($euros), 'time' => $balance['time']];
 }
 
 // Data from before the list had one goal, {gold, name}, where 0 gold meant none. It becomes the
@@ -426,6 +442,87 @@ function normalizeGoals(array $data): array
         $result[] = ['id' => $id, 'name' => text($goal['name'] ?? '')] + $price;
     }
     return $result;
+}
+
+// ---------- WoW Token price log ----------
+// Every WoW Token price looked up is appended to TOKEN_LOG_FILE as a "time,gold" line, time being
+// when Blizzard set the price. The Docker entrypoint runs "php api.php log-token-price" every few
+// minutes, so the log grows while no page is open; app.js reads it (the "tokenHistory" action) to
+// show the price history and when it's usually cheapest. The latest line is the current price.
+// It's kept out of DATA_FILE, which is read and written whole on every request.
+
+function parseTokenLine(string $line): ?array
+{
+    return preg_match('/^(\d+),(\d+)$/', trim($line), $m) ? [(int) $m[1], (int) $m[2]] : null;
+}
+
+// The last price in the open log, read from its end so it stays cheap as the log grows. A line cut
+// short by a crash is skipped.
+function lastTokenLine($fh): ?array
+{
+    // The seek fails on a shorter file, which is then read from the start.
+    $middle = fseek($fh, -128, SEEK_END) === 0;
+    $lines = explode("\n", (string) stream_get_contents($fh));
+    if ($middle) {
+        array_shift($lines); // most likely the end of a line
+    }
+    while ($lines) {
+        if ($entry = parseTokenLine(array_pop($lines))) {
+            return $entry;
+        }
+    }
+    return null;
+}
+
+/** @return list<array{int, int}> [time, gold] after $since, oldest first */
+function readTokenLog(int $since = 0): array
+{
+    $fh = @fopen(TOKEN_LOG_FILE, 'r');
+    if (!$fh) {
+        return [];
+    }
+    flock($fh, LOCK_SH); // never half a line that is being written
+    $log = [];
+    while (($line = fgets($fh)) !== false) {
+        $entry = parseTokenLine($line);
+        if ($entry && $entry[0] > $since) {
+            $log[] = $entry;
+        }
+    }
+    fclose($fh);
+    return $log;
+}
+
+// The current price for the API response: {gold, time}, or null before the first lookup.
+function latestTokenPrice(): ?array
+{
+    $fh = @fopen(TOKEN_LOG_FILE, 'r');
+    if (!$fh) {
+        return null;
+    }
+    flock($fh, LOCK_SH);
+    $last = lastTokenLine($fh);
+    fclose($fh);
+    return $last ? ['gold' => $last[1], 'time' => $last[0]] : null;
+}
+
+// Appends a price, unless it's the one logged last: Blizzard sets a new one every few minutes and
+// the log is checked more often.
+function logTokenPrice(int $time, int $gold): void
+{
+    $fh = @fopen(TOKEN_LOG_FILE, 'c+');
+    if (!$fh) {
+        throw new RuntimeException('Could not open the WoW Token price log');
+    }
+    flock($fh, LOCK_EX);
+    $last = lastTokenLine($fh);
+    if ($last === null || $time > $last[0]) {
+        // A line cut short by a crash is ended first, so it can't run into the new one.
+        $cut = fseek($fh, -1, SEEK_END) === 0 && fread($fh, 1) !== "\n";
+        fseek($fh, 0, SEEK_END);
+        fwrite($fh, ($cut ? "\n" : '') . "$time,$gold\n");
+    }
+    fclose($fh);
 }
 
 // ---------- Closed weeks ----------
@@ -549,7 +646,9 @@ function loadState(): array
     $state['bank'] = normalizeBank($state['bank']);
     $state['charGold'] = normalizeCharGold($state['charGold']);
     $state['reserve'] = normalizeReserve($state['reserve']);
-    $state['tokenPrice'] = normalizeTokenPrice($state['tokenPrice']);
+    $state['balance'] = normalizeBalance($state['balance']);
+    // Older files stored the token price; it now comes from the price log (latestTokenPrice).
+    unset($state['tokenPrice']);
     if (isset($state['lastWeek']) && !isWeekKey($state['lastWeek'])) {
         fail('Bad lastWeek "' . text($state['lastWeek']) . '" in the data file', 500);
     }
@@ -657,6 +756,24 @@ if (!is_dir(DATA_DIR)) {
     mkdir(DATA_DIR, 0770, true);
 }
 
+// The Docker entrypoint runs this every few minutes to log the WoW Token price (see TOKEN_LOG_FILE).
+if (PHP_SAPI === 'cli') {
+    if (($argv[1] ?? '') !== 'log-token-price') {
+        fwrite(STDERR, "Usage: php api.php log-token-price\n");
+        exit(2);
+    }
+    if (!armoryConfigured()) {
+        exit(0);
+    }
+    try {
+        logTokenPrice(...fetchTokenPrice());
+    } catch (RuntimeException $e) {
+        fwrite(STDERR, 'WoW Token price: ' . $e->getMessage() . "\n");
+        exit(1);
+    }
+    exit(0);
+}
+
 $action = $_GET['action'] ?? 'state';
 
 // Anything but reading state must be a JSON POST: cross-site pages can't send that without
@@ -692,12 +809,18 @@ if ($expires - time() < SESSION_TTL / 2) {
     signIn(); // sliding expiry: regular use keeps you signed in
 }
 
+// The price log has a lock of its own and isn't part of the state, so this returns only the log
+// entries after "since" (the page asks for what it doesn't have yet).
+if ($action === 'tokenHistory') {
+    echo json_encode(['history' => readTokenLog(is_int($in['since'] ?? null) ? $in['since'] : 0)]);
+    exit;
+}
+
 // Armory lookups can take seconds, so they run before the exclusive lock is taken; the
 // results are applied by character id below, skipping anyone deleted in the meantime.
-// The WoW Token price is looked up the same way.
+// The WoW Token price is looked up and logged the same way.
 $armory = [];
 $armoryError = null;
-$tokenPrice = null;
 if ($action === 'sync' || $action === 'tokenPrice') {
     if (!armoryConfigured()) {
         fail('Armory sync is not configured: set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET');
@@ -706,7 +829,7 @@ if ($action === 'sync' || $action === 'tokenPrice') {
         if ($action === 'sync') {
             $armory = fetchArmoryCharacters(readStateSnapshot()['characters'] ?? []);
         } else {
-            $tokenPrice = fetchTokenPrice();
+            logTokenPrice(...fetchTokenPrice());
         }
     } catch (RuntimeException $e) {
         $armoryError = $e->getMessage();
@@ -913,11 +1036,14 @@ switch ($action) {
         $state['reserve'] = (int) round((float) $gold);
         break;
 
+    case 'balance':
+        // The Battle.net Balance in euros; null clears it.
+        $euros = $in['euros'] ?? null;
+        $state['balance'] = $euros === null ? null : ['euros' => balanceEuros($euros), 'time' => time()];
+        break;
+
     case 'tokenPrice':
-        // Looked up before the lock (see above). A failed lookup keeps the last price.
-        if ($tokenPrice !== null) {
-            $state['tokenPrice'] = ['gold' => $tokenPrice, 'time' => time()];
-        }
+        // Looked up and logged before the lock (see above). A failed lookup keeps the last price.
         $state['tokenPriceError'] = $armoryError;
         break;
 
@@ -941,7 +1067,7 @@ switch ($action) {
             'charGold' => normalizeCharGold($data['charGold'] ?? []),
             'goals' => normalizeGoals($data),
             'reserve' => normalizeReserve($data['reserve'] ?? DEFAULT_RESERVE),
-            'tokenPrice' => normalizeTokenPrice($data['tokenPrice'] ?? null),
+            'balance' => normalizeBalance($data['balance'] ?? null),
         ];
         if (isWeekKey($data['lastWeek'] ?? null)) {
             // The next request closes the file's last week with the imported setup.
@@ -993,4 +1119,5 @@ $state['prices'] = (object) $state['prices'];
 $state['charGold'] = (object) $state['charGold'];
 $state['armoryEnabled'] = armoryConfigured();
 $state['autoSyncInterval'] = AUTO_SYNC_INTERVAL;
+$state['tokenPrice'] = latestTokenPrice();
 echo json_encode($state);

@@ -115,9 +115,9 @@ function realmSlugs(string $token): array
     return $slugs;
 }
 
-// The WoW Token's current Auction House price in gold (the API gives copper), for goals priced in
-// euros (the "tokenPrice" action in api.php).
-function fetchTokenPrice(): int
+// The WoW Token's current Auction House price, for the price log in api.php (logTokenPrice).
+/** @return array{int, int} when Blizzard set the price, and the price in gold (the API gives copper) */
+function fetchTokenPrice(): array
 {
     [$status, $data] = armoryRequest(armoryUrl('/data/wow/token/index', 'dynamic'), [
         CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . armoryToken()],
@@ -128,7 +128,8 @@ function fetchTokenPrice(): int
         }
         throw new RuntimeException("Could not load the WoW Token price (HTTP $status)");
     }
-    return intdiv($data['price'], 10000);
+    $updated = is_int($data['last_updated_timestamp'] ?? null) ? intdiv($data['last_updated_timestamp'], 1000) : time();
+    return [$updated, intdiv($data['price'], 10000)];
 }
 
 /**
