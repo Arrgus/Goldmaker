@@ -665,6 +665,8 @@ function countField(id, count, attrs, title) {
 // it. A token is redeemed for 13€ of Battle.net Balance in the EU, and tokens can't be split.
 const TOKEN_EUROS = 13;
 const TOKEN_REFRESH = 3600; // s; the token price is looked up again after this while it's needed
+// How short of the reserve a week can end and still count as reaching a goal (see weeksToGo).
+const RESERVE_SLACK = 0.25;
 
 // What a goal costs in gold: its gold, or the tokens for its euros at the last known price. The
 // Battle.net Balance from tokens already bought (euros) pays for what it can first. gold is null
@@ -715,13 +717,20 @@ function weeklyAverage() {
 }
 
 // How many weeks of average earnings the gold still to go takes: null when it's reached or there's
-// no average to go by.
+// no average to go by. The reserve is a rough figure, so a week that ends within RESERVE_SLACK of
+// it counts as enough: being a little short of the keep never adds a week. 0 means the goal itself
+// is covered already and the bank is only a little short of the keep.
 function weeksToGo(left, average) {
-    return left > 0 && average?.gold > 0 ? Math.ceil(left / average.gold) : null;
+    if (!(left > 0 && average?.gold > 0)) return null;
+    return Math.max(0, Math.ceil((left - (state.reserve || 0) * RESERVE_SLACK) / average.gold));
 }
 
-function fmtWeeks(n) {
-    return `≈ ${n} week${n === 1 ? '' : 's'}`;
+// "≈ 3 weeks, week of Nov 18": the weekly reset of the week the gold is likely there by, since how
+// much is made on a given day varies but the week's activities get done before the next reset.
+function fmtWeeks(n, what = '') {
+    if (!n) return `within reach now${what}`;
+    const reset = fromKey(shiftWeek(currentWeekKey(), n)).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+    return `≈ ${n} week${n === 1 ? '' : 's'}${what}, week of ${reset}`;
 }
 
 
@@ -768,7 +777,7 @@ function renderGold() {
     const current = goalsProgress(total)[0];
     const currentWeeks = current?.alone && weeksToGo(current.alone.left, weeklyAverage());
     const goalTitle = current?.alone && `${goalName(current.goal, 0)}: ${fmtGold(total)} of ${fmtGold(current.alone.need)}, `
-        + (current.alone.left ? `${fmtGold(current.alone.left)} to go${currentWeeks ? `, ${fmtWeeks(currentWeeks)}` : ''}` : 'reached')
+        + (current.alone.left ? `${fmtGold(current.alone.left)} to go${currentWeeks != null ? `, ${fmtWeeks(currentWeeks)}` : ''}` : 'reached')
         + '. Click to see the goals.';
     $('#nav-total').hidden = !counted && !current;
     $('#nav-total').innerHTML = `<span title="All your gold: the bank plus every character. Click to update it.">${fmtGold(total)}</span>`
@@ -845,13 +854,14 @@ function goalCostNote(gold, tokens, fromBalance) {
 // Weeks of average earnings until a goal is reached, under its progress. For a later goal, until
 // there's enough for the current goal and this one (its "on top" figure), and on its own.
 function goalWeeks(alone, onTop, average) {
-    const weeks = alone && weeksToGo((onTop || alone).left, average);
-    if (!weeks) return '';
-    const when = new Date(Date.now() + weeks * 7 * DAY * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-    const own = onTop && weeksToGo(alone.left, average);
-    const title = `At ${fmtGold(average.gold)} earned a week${onTop ? `, for ${goalName(state.goals[0], 0)} and this goal together` : ''}`;
-    return `<span class="goal-eta" title="${esc(title)}">${fmtWeeks(weeks)}${onTop ? ' for both' : ''}, around ${esc(when)}`
-        + `${own && own !== weeks ? ` · ${fmtWeeks(own)} on its own` : ''}</span>`;
+    const left = (onTop || alone)?.left;
+    const weeks = alone && weeksToGo(left, average);
+    if (weeks == null) return '';
+    const own = onTop ? weeksToGo(alone.left, average) : null;
+    const short = weeks < Math.ceil(left / average.gold) ? ', with the bank a little short of the keep' : '';
+    const title = `At ${fmtGold(average.gold)} earned a week${onTop ? `, for ${goalName(state.goals[0], 0)} and this goal together` : ''}${short}`;
+    return `<span class="goal-eta" title="${esc(title)}">${fmtWeeks(weeks, onTop ? ' for both' : '')}`
+        + `${own != null && own !== weeks ? ` · ${fmtWeeks(own, ' on its own')}` : ''}</span>`;
 }
 
 // What "weeks to go" is based on, with the switch that counts the current week too.
@@ -899,12 +909,12 @@ function newGoalRow(count) {
         + '<td colspan="2"><button id="goal-add">Add goal</button></td></tr>';
 }
 
-// The gold that must stay in the bank after buying a goal, added to every goal.
+// The gold that must stay in the bank after buying a goal (counted once, even for two goals together).
 function reserveRow() {
     return '<tr class="reserve"><th>Keep</th><td class="muted">in the bank after buying a goal</td>'
         + `<td><input class="goal-input count-input" id="goal-reserve" data-field="reserve" value="${(state.reserve || 0).toLocaleString('en-US')}"`
         + ' placeholder="none" inputmode="decimal" autocomplete="off"></td>'
-        + '<td colspan="2" class="muted">Added to every goal</td></tr>';
+        + '<td colspan="2"></td></tr>';
 }
 
 // ---------- WoW Token ----------

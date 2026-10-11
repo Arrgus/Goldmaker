@@ -366,7 +366,12 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     check('the average leaves out the current week', JSON.stringify(app('weeklyAverage()')) === '{"gold":2000,"weeks":2}', JSON.stringify(app('weeklyAverage()')));
     check('weeks to go round up', app('weeksToGo(5000, weeklyAverage())') === 3 && app('weeksToGo(0, weeklyAverage())') === null
         && app('weeksToGo(5000, null)') === null);
-    app('countThisWeek = true');
+    app('state.reserve = 1000');
+    check('being a little short of the reserve never adds a week', app('weeksToGo(4200, weeklyAverage())') === 2
+        && app('weeksToGo(4300, weeklyAverage())') === 3 && app('weeksToGo(200, weeklyAverage())') === 0);
+    check('the date is the reset of that week', app('fmtWeeks(2)') === `≈ 2 weeks, week of ${app('fromKey(shiftWeek(currentWeekKey(), 2))')
+        .toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}` && app('fmtWeeks(0)') === 'within reach now', app('fmtWeeks(2)'));
+    app('state.reserve = 0; countThisWeek = true');
     check('the switch counts the current week too', JSON.stringify(app('weeklyAverage()')) === '{"gold":1500,"weeks":3}', JSON.stringify(app('weeklyAverage()')));
     app('countThisWeek = false');
 
