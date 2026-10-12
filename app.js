@@ -1304,6 +1304,7 @@ function renderManage() {
         return listItem('characters', c, `${charName(c)} <span class="muted">${c.level} ${esc(c.class)}${c.realm ? ' · ' + esc(c.realm) : ''}</span>`
             + (c.syncError ? ` <span class="sync-error">${esc(c.syncError)}</span>` : '') + details);
     }).join('') || '<li class="muted">No characters yet.</li>';
+    renderCharStats();
     renderSyncStatus();
 
     $('#act-list').innerHTML = state.activities.map(a => {
@@ -1312,6 +1313,35 @@ function renderManage() {
         return listItem('activities', a, `${esc(a.name)}${reqBadge(a)}${a.gold ? ` <span class="gold-inline">~${fmtGold(a.gold)}</span>` : ''}`
             + (details ? `<span class="details">${details}</span>` : ''));
     }).join('') || '<li class="muted">No activities yet.</li>';
+}
+
+// How many characters there are, by level bracket and by class, most common first. Brackets are
+// tens (80–89), except that the level cap (90, from the Manage form's level field) is one of its
+// own. Only brackets and classes that have someone are shown.
+function levelBracket(level) {
+    const cap = Number($('#char-form [name=level]').max);
+    if (level >= cap) return String(cap);
+    const from = Math.floor(level / 10) * 10;
+    return `${from || 1}–${from + 9}`;
+}
+
+function renderCharStats() {
+    const chars = state.characters;
+    const box = $('#char-stats');
+    box.hidden = !chars.length;
+    if (!chars.length) return;
+    const brackets = new Map();
+    for (const c of [...chars].sort((a, b) => b.level - a.level)) {
+        const label = levelBracket(c.level);
+        brackets.set(label, (brackets.get(label) || 0) + 1);
+    }
+    const classes = new Map();
+    for (const c of chars) classes.set(c.class, (classes.get(c.class) || 0) + 1);
+    const chip = (label, count, style = '') => `<span class="stat-chip"${style}>${label} <b>${count}</b></span>`;
+    box.innerHTML = `<div class="stat-row"><span class="stat-label">Total</span>${chip('Characters', chars.length)}</div>`
+        + `<div class="stat-row"><span class="stat-label">Level</span>${[...brackets].map(([l, n]) => chip(l, n)).join('')}</div>`
+        + `<div class="stat-row"><span class="stat-label">Class</span>${[...classes].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            .map(([cls, n]) => chip(cls ? esc(cls) : 'No class', n, ` style="color:${CLASSES[cls] || CLASSES['']}"`)).join('')}</div>`;
 }
 
 // ---------- Armory sync ----------
