@@ -1322,9 +1322,10 @@ function renderManage() {
 
 // How many characters there are, by level bracket and by class (alphabetically, "No class" last).
 // The brackets are the ones activities ask for: the level cap (90, from the Manage form's level
-// field), 80–89 and below 80. Clicking a bracket or a class filters the list (both can be on at once); each row's
-// counts then only count the characters the other filter lets through.
-let charFilter = { level: null, class: null };
+// field), 80–89 and below 80. Clicking a bracket adds it to the filter, or takes it off again, so
+// several can be on; clicking a class filters by that class alone. Each row's counts then only
+// count the characters the other row's filter lets through.
+let charFilter = { level: new Set(), class: null };
 
 function levelBracket(level) {
     const cap = Number($('#char-form [name=level]').max);
@@ -1332,11 +1333,11 @@ function levelBracket(level) {
 }
 
 function charFilterOn() {
-    return charFilter.level !== null || charFilter.class !== null;
+    return charFilter.level.size > 0 || charFilter.class !== null;
 }
 
 function charShown(c, ignore) {
-    return (ignore === 'level' || charFilter.level === null || levelBracket(c.level) === charFilter.level)
+    return (ignore === 'level' || !charFilter.level.size || charFilter.level.has(levelBracket(c.level)))
         && (ignore === 'class' || charFilter.class === null || c.class === charFilter.class);
 }
 
@@ -1348,13 +1349,15 @@ function renderCharStats() {
     const count = (key, ignore) => {
         const counts = new Map();
         for (const c of chars) if (charShown(c, ignore)) counts.set(key(c), (counts.get(key(c)) || 0) + 1);
-        if (charFilter[ignore] !== null && !counts.has(charFilter[ignore])) counts.set(charFilter[ignore], 0);
         return counts;
     };
     const brackets = count(c => levelBracket(c.level), 'level');
     const classes = count(c => c.class, 'class');
+    // A selected bracket or class stays clickable even when the other filter leaves it no one.
+    for (const l of charFilter.level) if (!brackets.has(l)) brackets.set(l, 0);
+    if (charFilter.class !== null && !classes.has(charFilter.class)) classes.set(charFilter.class, 0);
     const chip = (attr, value, label, n, style = '') => {
-        const active = attr === 'all' ? !charFilterOn() : charFilter[attr] === value;
+        const active = attr === 'all' ? !charFilterOn() : attr === 'level' ? charFilter.level.has(value) : charFilter.class === value;
         return `<button type="button" class="stat-chip${active ? ' active' : ''}" data-filter="${attr}" data-value="${esc(value)}"${style}`
             + ` aria-pressed="${active}">${label} <b>${n}</b></button>`;
     };
@@ -1372,8 +1375,9 @@ $('#char-stats').addEventListener('click', e => {
     const btn = e.target.closest('button[data-filter]');
     if (!btn) return;
     const { filter, value } = btn.dataset;
-    if (filter === 'all') charFilter = { level: null, class: null };
-    else charFilter[filter] = charFilter[filter] === value ? null : value;
+    if (filter === 'all') charFilter = { level: new Set(), class: null };
+    else if (filter === 'level') charFilter.level.has(value) ? charFilter.level.delete(value) : charFilter.level.add(value);
+    else charFilter.class = charFilter.class === value ? null : value;
     renderManage();
 });
 
