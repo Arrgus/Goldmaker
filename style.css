@@ -337,14 +337,17 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .char-stats { display: grid; gap: 6px; margin-bottom: 14px; }
 .stat-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .stat-label { width: 44px; font-size: 12px; color: var(--muted); }
-.stat-chip { padding: 1px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: 10px; white-space: nowrap; }
+.stat-chip { padding: 1px 8px; font-size: 13px; background: none; border: 1px solid var(--border); border-radius: 10px; white-space: nowrap; }
+.stat-chip.active { border-color: var(--gold); background: var(--panel-2); }
 .stat-chip b { margin-left: 2px; color: var(--text); }
+.stat-row button.link { padding: 0; font-size: 12px; }
 .sync-error { color: var(--danger); font-size: 13px; }
 .sync-warn { color: var(--danger); cursor: help; }
 .list { list-style: none; margin: 0; padding: 0; }
 .list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
 .list li .grow { flex: 1; }
 .list li button { padding: 2px 8px; font-size: 13px; }
+.list li button:disabled { opacity: .35; cursor: default; border-color: var(--border); }
 .list li button.sync-professions { padding: 0 0 0 10px; font-size: 12px; white-space: nowrap; }
 
 /* Narrower windows: History puts each week's characters on a line of their own. */

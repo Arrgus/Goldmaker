@@ -1287,23 +1287,28 @@ function patternBars(pattern, label, name) {
 
 function listItem(type, item, inner) {
     const editing = forms[type].form.elements.id.value === item.id;
+    // A move swaps neighbours in the whole list, which a filter may hide, so it waits for "Show all".
+    const move = type === 'characters' && charFilterOn() ? ' disabled title="Show all characters to reorder them"' : ' title="Move up"';
     return `<li${editing ? ' class="editing"' : ''}>
         <span class="grow">${inner}</span>
-        <button data-move="-1" data-type="${type}" data-id="${item.id}" title="Move up">▲</button>
-        <button data-move="1" data-type="${type}" data-id="${item.id}" title="Move down">▼</button>
+        <button data-move="-1" data-type="${type}" data-id="${item.id}"${move}>▲</button>
+        <button data-move="1" data-type="${type}" data-id="${item.id}"${move.replace('up', 'down')}>▼</button>
         <button data-edit data-type="${type}" data-id="${item.id}">Edit</button>
         <button data-delete data-type="${type}" data-id="${item.id}" class="danger">Delete</button>
     </li>`;
 }
 
 function renderManage() {
-    $('#char-list').innerHTML = state.characters.map(c => {
+    const editingId = forms.characters.form.elements.id.value;
+    // The character being edited stays in the list whatever the filter.
+    const listed = state.characters.filter(c => charShown(c) || c.id === editingId);
+    $('#char-list').innerHTML = listed.map(c => {
         const professions = professionsOf(c).map(esc).join(', ');
         const details = state.armoryEnabled || professions
             ? `<span class="details">${professions || 'No professions'}${professionSyncButton(c)}</span>` : '';
         return listItem('characters', c, `${charName(c)} <span class="muted">${c.level} ${esc(c.class)}${c.realm ? ' · ' + esc(c.realm) : ''}</span>`
             + (c.syncError ? ` <span class="sync-error">${esc(c.syncError)}</span>` : '') + details);
-    }).join('') || '<li class="muted">No characters yet.</li>';
+    }).join('') || `<li class="muted">${state.characters.length ? 'No characters match the filter.' : 'No characters yet.'}</li>`;
     renderCharStats();
     renderSyncStatus();
 
@@ -1315,14 +1320,24 @@ function renderManage() {
     }).join('') || '<li class="muted">No activities yet.</li>';
 }
 
-// How many characters there are, by level bracket and by class, most common first. Brackets are
-// tens (80–89), except that the level cap (90, from the Manage form's level field) is one of its
-// own. Only brackets and classes that have someone are shown.
+// How many characters there are, by level bracket and by class, most common first. The brackets
+// are the ones activities ask for: the level cap (90, from the Manage form's level field), 80–89
+// and below 80. Clicking a bracket or a class filters the list (both can be on at once); each row's
+// counts then only count the characters the other filter lets through.
+let charFilter = { level: null, class: null };
+
 function levelBracket(level) {
     const cap = Number($('#char-form [name=level]').max);
-    if (level >= cap) return String(cap);
-    const from = Math.floor(level / 10) * 10;
-    return `${from || 1}–${from + 9}`;
+    return level >= cap ? String(cap) : level >= 80 ? '80–89' : '1–79';
+}
+
+function charFilterOn() {
+    return charFilter.level !== null || charFilter.class !== null;
+}
+
+function charShown(c, ignore) {
+    return (ignore === 'level' || charFilter.level === null || levelBracket(c.level) === charFilter.level)
+        && (ignore === 'class' || charFilter.class === null || c.class === charFilter.class);
 }
 
 function renderCharStats() {
@@ -1330,19 +1345,37 @@ function renderCharStats() {
     const box = $('#char-stats');
     box.hidden = !chars.length;
     if (!chars.length) return;
-    const brackets = new Map();
-    for (const c of [...chars].sort((a, b) => b.level - a.level)) {
-        const label = levelBracket(c.level);
-        brackets.set(label, (brackets.get(label) || 0) + 1);
-    }
-    const classes = new Map();
-    for (const c of chars) classes.set(c.class, (classes.get(c.class) || 0) + 1);
-    const chip = (label, count, style = '') => `<span class="stat-chip"${style}>${label} <b>${count}</b></span>`;
-    box.innerHTML = `<div class="stat-row"><span class="stat-label">Total</span>${chip('Characters', chars.length)}</div>`
-        + `<div class="stat-row"><span class="stat-label">Level</span>${[...brackets].map(([l, n]) => chip(l, n)).join('')}</div>`
+    const count = (key, ignore) => {
+        const counts = new Map();
+        for (const c of chars) if (charShown(c, ignore)) counts.set(key(c), (counts.get(key(c)) || 0) + 1);
+        if (charFilter[ignore] !== null && !counts.has(charFilter[ignore])) counts.set(charFilter[ignore], 0);
+        return counts;
+    };
+    const brackets = count(c => levelBracket(c.level), 'level');
+    const classes = count(c => c.class, 'class');
+    const chip = (attr, value, label, n, style = '') => {
+        const active = attr === 'all' ? !charFilterOn() : charFilter[attr] === value;
+        return `<button type="button" class="stat-chip${active ? ' active' : ''}" data-filter="${attr}" data-value="${esc(value)}"${style}`
+            + ` aria-pressed="${active}">${label} <b>${n}</b></button>`;
+    };
+    const shown = chars.filter(c => charShown(c)).length;
+    const levels = [levelBracket(Infinity), '80–89', '1–79'].filter(l => brackets.has(l));
+    box.innerHTML = `<div class="stat-row"><span class="stat-label">Total</span>`
+        + chip('all', '', charFilterOn() ? 'Showing' : 'Characters', charFilterOn() ? `${shown} of ${chars.length}` : chars.length)
+        + (charFilterOn() ? '<button type="button" class="link" data-filter="all" data-value="">Show all</button>' : '') + '</div>'
+        + `<div class="stat-row"><span class="stat-label">Level</span>${levels.map(l => chip('level', l, l, brackets.get(l))).join('')}</div>`
         + `<div class="stat-row"><span class="stat-label">Class</span>${[...classes].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-            .map(([cls, n]) => chip(cls ? esc(cls) : 'No class', n, ` style="color:${CLASSES[cls] || CLASSES['']}"`)).join('')}</div>`;
+            .map(([cls, n]) => chip('class', cls, cls ? esc(cls) : 'No class', n, ` style="color:${CLASSES[cls] || CLASSES['']}"`)).join('')}</div>`;
 }
+
+$('#char-stats').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-filter]');
+    if (!btn) return;
+    const { filter, value } = btn.dataset;
+    if (filter === 'all') charFilter = { level: null, class: null };
+    else charFilter[filter] = charFilter[filter] === value ? null : value;
+    renderManage();
+});
 
 // ---------- Armory sync ----------
 // The server refreshes levels and classes from the Blizzard API (armory.php). The page asks for
