@@ -1320,9 +1320,9 @@ function renderManage() {
     }).join('') || '<li class="muted">No activities yet.</li>';
 }
 
-// How many characters there are, by level bracket and by class, most common first. The brackets
-// are the ones activities ask for: the level cap (90, from the Manage form's level field), 80–89
-// and below 80. Clicking a bracket or a class filters the list (both can be on at once); each row's
+// How many characters there are, by level bracket and by class (alphabetically, "No class" last).
+// The brackets are the ones activities ask for: the level cap (90, from the Manage form's level
+// field), 80–89 and below 80. Clicking a bracket or a class filters the list (both can be on at once); each row's
 // counts then only count the characters the other filter lets through.
 let charFilter = { level: null, class: null };
 
@@ -1364,7 +1364,7 @@ function renderCharStats() {
         + chip('all', '', charFilterOn() ? 'Showing' : 'Characters', charFilterOn() ? `${shown} of ${chars.length}` : chars.length)
         + (charFilterOn() ? '<button type="button" class="link" data-filter="all" data-value="">Show all</button>' : '') + '</div>'
         + `<div class="stat-row"><span class="stat-label">Level</span>${levels.map(l => chip('level', l, l, brackets.get(l))).join('')}</div>`
-        + `<div class="stat-row"><span class="stat-label">Class</span>${[...classes].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        + `<div class="stat-row"><span class="stat-label">Class</span>${[...classes].sort((a, b) => !a[0] - !b[0] || a[0].localeCompare(b[0]))
             .map(([cls, n]) => chip('class', cls, cls ? esc(cls) : 'No class', n, ` style="color:${CLASSES[cls] || CLASSES['']}"`)).join('')}</div>`;
 }
 
