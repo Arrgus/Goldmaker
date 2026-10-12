@@ -17,6 +17,10 @@ const CLASSES = {
     'Warrior': '#C69B6D',
 };
 
+// The primary professions; a character can have two. Same list as PROFESSIONS in api.php.
+const PROFESSIONS = ['Alchemy', 'Blacksmithing', 'Enchanting', 'Engineering', 'Herbalism', 'Inscription',
+    'Jewelcrafting', 'Leatherworking', 'Mining', 'Skinning', 'Tailoring'];
+
 let state = { characters: [], activities: [], completions: {}, deposits: {}, bank: null, charGold: {} };
 let viewedWeek = currentWeekKey();
 
@@ -233,6 +237,21 @@ function lootValue(week, charId, act) {
     return materialsOf(act).reduce((sum, m) => sum + (counts[m.id] || 0) * priceOf(week, m.id).price, 0);
 }
 
+// A character's professions (set under Manage) and the gold made with one in a week, typed in on
+// the Week page; null when nothing was typed in. It's gold on the character, so it's deposited.
+function professionsOf(char) {
+    return char?.professions || [];
+}
+
+function professionGoldOf(week, charId, profession) {
+    return state.professionGold?.[week]?.[charId]?.[profession] ?? null;
+}
+
+// Only the professions the character had that week count, like its activities.
+function professionTotal(week, char) {
+    return professionsOf(char).reduce((sum, p) => sum + (professionGoldOf(week, char.id, p) || 0), 0);
+}
+
 function fmtGold(n) {
     return `${Math.round(n).toLocaleString()}g`;
 }
@@ -286,12 +305,14 @@ function charName(c) {
     return `<span style="color:${CLASSES[c.class] || CLASSES['']}">${esc(c.name)}</span>`;
 }
 
-// gold is the gold earned, mats the value of the materials looted; only gold is deposited.
+// gold is the gold earned, mats the value of the materials looted; only gold is deposited. prof is
+// the part of gold made with professions.
 function weekStats(week) {
-    let done = 0, total = 0, gold = 0, mats = 0, pending = 0;
+    let done = 0, total = 0, gold = 0, mats = 0, prof = 0, pending = 0;
     const { characters, activities } = weekSetup(week);
     const perChar = characters.map(c => {
-        let d = 0, t = 0, g = 0, m = 0;
+        const p = professionTotal(week, c);
+        let d = 0, t = 0, g = p, m = 0;
         for (const a of activities) {
             if (!eligible(c, a)) continue;
             t++;
@@ -303,15 +324,16 @@ function weekStats(week) {
         }
         const deposits = depositsOf(week, c.id);
         const deposited = deposits.reduce((sum, dep) => sum + dep.gold, 0);
-        const p = tracksDeposits(week) ? Math.max(0, g - deposited) : 0;
+        const left = tracksDeposits(week) ? Math.max(0, g - deposited) : 0;
         done += d;
         total += t;
         gold += g;
         mats += m;
-        pending += p;
-        return { char: c, done: d, total: t, gold: g, mats: m, deposits, deposited, pending: p };
+        prof += p;
+        pending += left;
+        return { char: c, done: d, total: t, gold: g, mats: m, prof: p, deposits, deposited, pending: left };
     });
-    return { done, total, gold, mats, pending, perChar };
+    return { done, total, gold, mats, prof, pending, perChar };
 }
 
 // ---------- Login ----------
@@ -408,19 +430,22 @@ function renderWeek() {
     $('#week-summary').innerHTML = weekSummary(stats);
 
     // The activities with loot (Naxxramas) can be hidden, and with them the characters who can't
-    // do anything else: those below level 80. The totals still count everything.
+    // do anything else: those below level 80 without professions. The totals still count everything.
     const lootActs = acts.filter(a => materialsOf(a).length);
     const shown = hideLoot ? acts.filter(a => !lootActs.includes(a)) : acts;
-    const rows = hideLoot ? stats.perChar.filter(p => shown.some(a => eligible(p.char, a))) : stats.perChar;
+    const rows = hideLoot
+        ? stats.perChar.filter(p => professionsOf(p.char).length || shown.some(a => eligible(p.char, a))) : stats.perChar;
     const hiddenChars = stats.perChar.length - rows.length;
     $('#loot-toggle').hidden = !lootActs.length;
     $('#hide-loot').checked = hideLoot;
     $('#loot-toggle span').textContent = `Hide ${lootActs.map(a => a.name).join(', ')}`
         + (hideLoot && hiddenChars ? ` (and ${hiddenChars} character${hiddenChars === 1 ? '' : 's'})` : '');
-    if (!shown.length || !rows.length) {
+    if (!rows.length) {
         $('#grid').innerHTML = '<div class="empty">Everything this week is hidden.</div>';
         return;
     }
+    // A column per profession slot, once a character shown has a profession.
+    const profCols = Math.max(0, ...rows.map(p => professionsOf(p.char).length));
 
     // Characters are rows and activities are columns: there are far more characters than activities.
     // An activity with loot gets a group of columns under its name: the run, a count per material
@@ -441,16 +466,20 @@ function renderWeek() {
             + mats.map(m => priceHeader(a, m)).join('')
             + `<th class="sub" title="Gold from vendored items">Vendor<span class="lvl">${typical}</span></th>`;
     }
+    if (profCols) {
+        head += `<th class="group"${span} colspan="${profCols}" title="Gold made with professions this week. Set a character's professions under Manage.">Professions</th>`;
+    }
     head += `<th class="total"${span} title="Activities done out of those the character can do">Done</th>`
-        + `<th class="total"${span} title="Gold earned, plus the value of the mats looted">Gold</th>`
+        + `<th class="total"${span} title="Gold earned with activities and professions, plus the value of the mats looted">Gold</th>`
         + (bank ? `<th class="total"${span} title="Gold taken to the bank. Mats aren't deposited.">Bank</th>` : '') + '</tr>'
         + (grouped ? `<tr>${subhead}</tr>` : '');
 
     let body = '';
     const cols = shown.map(() => ({ done: 0, total: 0, value: 0, gold: 0, counts: {} }));
-    for (const { char: c, done, total, gold, mats, ...deposits } of rows) {
+    for (const { char: c, done, total, gold, mats, prof, ...deposits } of rows) {
         body += `<tr><th>${charName(c)}<span class="lvl">${c.level}${c.realm ? ' · ' + esc(c.realm) : ''}${syncWarning(c)}</span></th>`
             + shown.map((a, i) => activityCells(c, a, cols[i])).join('')
+            + professionCells(c, profCols)
             + `<td class="row-done${total && done === total ? ' all-done' : ''}">${done}/${total}</td>`
             + `<td class="row-gold">${gold || mats ? fmtGold(gold) + matsLine(mats) : '–'}</td>`
             + (bank ? `<td class="row-bank">${depositButton(c, deposits)}</td>` : '') + '</tr>';
@@ -467,7 +496,11 @@ function renderWeek() {
         }
         if (mats.length) foot += `<td><span class="gold">${fmtGold(col.gold)}</span></td>`;
     });
-    foot += `<td class="${stats.total && stats.done === stats.total ? 'all-done' : ''}">${stats.done}/${stats.total}</td>`
+    if (profCols) {
+        const profGold = rows.reduce((sum, p) => sum + p.prof, 0);
+        foot += `<td colspan="${profCols}"><span class="gold">${fmtGold(profGold)}</span></td>`;
+    }
+    foot +=`<td class="${stats.total && stats.done === stats.total ? 'all-done' : ''}">${stats.done}/${stats.total}</td>`
         + `<td><span class="gold">${fmtGold(stats.gold)}</span>${matsLine(stats.mats)}</td>`
         + (bank ? `<td>${stats.pending ? `<span class="to-deposit">${fmtGold(stats.pending)} to deposit</span>`
             : stats.gold ? '<span class="all-done">All banked ✔</span>' : ''}</td>` : '') + '</tr>';
@@ -475,11 +508,31 @@ function renderWeek() {
     setGrid(`<table class="grid"><thead>${head}</thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`);
 }
 
+// The fields for the gold a character made with each profession this week, one column per slot.
+// A character with fewer professions than there are columns gets empty cells.
+function professionCells(c, count) {
+    const professions = professionsOf(c);
+    let html = '';
+    for (let i = 0; i < count; i++) {
+        const p = professions[i];
+        if (!p) {
+            html += '<td class="cell na">–</td>';
+            continue;
+        }
+        const gold = professionGoldOf(viewedWeek, c.id, p);
+        html += `<td class="loot prof"><span class="prof-name">${esc(p)}</span><input class="loot-input prof-input" id="prof-${c.id}-${i}"`
+            + ` data-char="${c.id}" data-prof="${esc(p)}" data-slot="${i}" value="${gold == null ? '' : gold.toLocaleString('en-US')}"`
+            + ` inputmode="decimal" autocomplete="off" title="${esc(c.name)}: gold made with ${esc(p)} this week"></td>`;
+    }
+    return html;
+}
+
 // Next to the week's dates: what was done, earned and is still to take to the bank.
 function weekSummary(s) {
+    const parts = [s.prof && `${fmtGold(s.prof)} from professions`, s.mats && `${fmtGold(s.mats)} in mats`].filter(Boolean);
     return `<div><span class="muted">Done</span><b class="count">${s.done}/${s.total}</b></div>`
         + `<div><span class="muted">Earned</span><b>${fmtGold(s.gold + s.mats)}</b>`
-        + `${s.mats ? `<span class="muted">incl. ${fmtGold(s.mats)} in mats</span>` : ''}</div>`
+        + `${parts.length ? `<span class="muted">incl. ${parts.join(' and ')}</span>` : ''}</div>`
         + (s.pending ? `<div><span class="muted">To deposit</span><b class="to-deposit">${fmtGold(s.pending)}</b></div>` : '');
 }
 
@@ -617,7 +670,7 @@ function renderHistory() {
             <div class="when">${esc(weekLabel(k))}${k === current ? '<span class="badge-current">current</span>' : ''}</div>
             <div class="bar"><div style="width:${pct}%"></div></div>
             <div class="total">${s.done}/${s.total}</div>
-            <div class="week-gold">${fmtGold(earned)}${s.mats ? `<span class="mats">incl. ${fmtGold(s.mats)} in mats</span>` : ''}${s.pending ? `<span class="to-deposit">${fmtGold(s.pending)} to deposit</span>` : ''}</div>
+            <div class="week-gold">${fmtGold(earned)}${s.prof ? `<span class="mats">incl. ${fmtGold(s.prof)} from professions</span>` : ''}${s.mats ?`<span class="mats">incl. ${fmtGold(s.mats)} in mats</span>` : ''}${s.pending ? `<span class="to-deposit">${fmtGold(s.pending)} to deposit</span>` : ''}</div>
             <div class="chars">${chars}</div>
         </div>`;
     }
@@ -1244,10 +1297,13 @@ function listItem(type, item, inner) {
 }
 
 function renderManage() {
-    $('#char-list').innerHTML = state.characters.map(c =>
-        listItem('characters', c, `${charName(c)} <span class="muted">${c.level} ${esc(c.class)}${c.realm ? ' · ' + esc(c.realm) : ''}</span>`
-            + (c.syncError ? ` <span class="sync-error">${esc(c.syncError)}</span>` : ''))
-    ).join('') || '<li class="muted">No characters yet.</li>';
+    $('#char-list').innerHTML = state.characters.map(c => {
+        const professions = professionsOf(c).map(esc).join(', ');
+        const details = state.armoryEnabled || professions
+            ? `<span class="details">${professions || 'No professions'}${professionSyncButton(c)}</span>` : '';
+        return listItem('characters', c, `${charName(c)} <span class="muted">${c.level} ${esc(c.class)}${c.realm ? ' · ' + esc(c.realm) : ''}</span>`
+            + (c.syncError ? ` <span class="sync-error">${esc(c.syncError)}</span>` : '') + details);
+    }).join('') || '<li class="muted">No characters yet.</li>';
     renderSyncStatus();
 
     $('#act-list').innerHTML = state.activities.map(a => {
@@ -1318,6 +1374,36 @@ function renderSyncStatus() {
 }
 
 $('#sync-btn').addEventListener('click', () => sync().catch(() => {}));
+
+// A character's professions are looked up on the armory only when asked, from a button on its row
+// under Manage (the "syncProfessions" action). Unlike the levels' sync it goes through the request
+// queue: it's a single lookup, and a logout then waits for it like any other request.
+const professionSyncs = new Set(); // ids of the characters being looked up
+
+function professionSyncButton(c) {
+    if (!state.armoryEnabled) return '';
+    const busy = professionSyncs.has(c.id);
+    return `<button class="link sync-professions" data-sync-professions="${c.id}"${busy ? ' disabled' : ''}`
+        + ` title="Look up ${esc(c.name)}'s professions on the armory. They replace the ones set here.">${busy ? 'syncing…' : '⟳ sync from armory'}</button>`;
+}
+
+async function syncProfessions(charId) {
+    if (professionSyncs.has(charId)) return;
+    professionSyncs.add(charId);
+    renderManage();
+    try {
+        await api('syncProfessions', { id: charId });
+        // A character being edited would otherwise save its old professions back.
+        if (forms.characters.form.elements.id.value === charId) {
+            setProfessionFields(state.characters.find(c => c.id === charId));
+        }
+    } catch {
+        // api() has already shown the error
+    } finally {
+        professionSyncs.delete(charId);
+        renderManage();
+    }
+}
 
 // The WoW Token price, looked up and logged by the server (the "tokenPrice" action). The server
 // logs it every few minutes on its own, so the page only asks from the Refresh button, or when goals
@@ -1405,9 +1491,13 @@ The current data is kept as a backup on the server.`)) return;
 
 // ---------- Forms ----------
 
+// body turns the form's fields into what the action takes.
 const forms = {
-    characters: { form: $('#char-form'), action: 'saveCharacter' },
-    activities: { form: $('#act-form'), action: 'saveActivity' },
+    characters: {
+        form: $('#char-form'), action: 'saveCharacter',
+        body: ({ prof1, prof2, ...fields }) => ({ ...fields, professions: [prof1, prof2].filter(Boolean) }),
+    },
+    activities: { form: $('#act-form'), action: 'saveActivity', body: fields => fields },
 };
 
 function resetForm(form) {
@@ -1419,10 +1509,10 @@ function resetForm(form) {
     renderManage();
 }
 
-for (const { form, action } of Object.values(forms)) {
+for (const { form, action, body } of Object.values(forms)) {
     form.addEventListener('submit', async e => {
         e.preventDefault();
-        await api(action, Object.fromEntries(new FormData(form)));
+        await api(action, body(Object.fromEntries(new FormData(form))));
         resetForm(form);
         form.elements.name.focus();
     });
@@ -1441,6 +1531,17 @@ goldField.addEventListener('invalid', e => {
 
 $('#char-form').elements.class.innerHTML = Object.keys(CLASSES)
     .map(c => `<option value="${c}">${c || 'Class…'}</option>`).join('');
+for (const name of ['prof1', 'prof2']) {
+    $('#char-form').elements[name].innerHTML = ['', ...PROFESSIONS]
+        .map(p => `<option value="${p}">${p || 'None'}</option>`).join('');
+}
+
+// The character form's two profession selects, from a character's list.
+function setProfessionFields(char) {
+    const [prof1 = '', prof2 = ''] = professionsOf(char);
+    forms.characters.form.elements.prof1.value = prof1;
+    forms.characters.form.elements.prof2.value = prof2;
+}
 
 // ---------- Events ----------
 
@@ -1540,13 +1641,15 @@ function focusLoot(charId, actId) {
     return true;
 }
 
-// Loot and price fields save when they're left, if they changed since they were rendered (a
-// re-render keeps what's being typed, see setGrid).
+// Loot, price and profession fields save when they're left, if they changed since they were
+// rendered (a re-render keeps what's being typed, see setGrid).
 $('#grid').addEventListener('focusout', e => {
     const input = e.target;
     if (swapping || !input.matches('.loot-input, .price-input') || input.value === input.defaultValue) return;
     if (input.matches('.price-input')) {
         savePrice(input);
+    } else if (input.matches('.prof-input')) {
+        saveProfession(input);
     } else {
         saveLoot(input);
     }
@@ -1575,11 +1678,22 @@ $('#grid').addEventListener('keydown', e => {
 });
 
 // The same loot field in another row (step -1 is the row above), skipping the characters who
-// can't do the activity.
+// can't do the activity. Profession fields move within their column.
 function fieldBelow(input, step) {
-    const { act, mat } = input.dataset;
-    const column = [...$('#grid').querySelectorAll(`.loot-input[data-act="${act}"]${mat ? `[data-mat="${mat}"]` : ':not([data-mat])'}`)];
+    const { act, mat, slot } = input.dataset;
+    const selector = slot ? `.prof-input[data-slot="${slot}"]`
+        : `.loot-input[data-act="${act}"]${mat ? `[data-mat="${mat}"]` : ':not([data-mat])'}`;
+    const column = [...$('#grid').querySelectorAll(selector)];
     return column[column.indexOf(input) + step];
+}
+
+// Saves the gold made with a profession; empty removes it. Like the activities' gold, "25" is 25k.
+function saveProfession(input) {
+    const gold = parseGold(input.value);
+    input.classList.toggle('invalid', Number.isNaN(gold));
+    if (Number.isNaN(gold)) return;
+    const { char, prof } = input.dataset;
+    api('profession', { week: viewedWeek, charId: char, profession: prof, gold });
 }
 
 // Saves one loot field, ticking the run if it wasn't yet; a field that isn't a number is marked
@@ -1780,6 +1894,11 @@ $('#history').addEventListener('click', e => {
 });
 
 $('#view-manage').addEventListener('click', e => {
+    const professions = e.target.closest('button[data-sync-professions]');
+    if (professions) {
+        syncProfessions(professions.dataset.syncProfessions);
+        return;
+    }
     const btn = e.target.closest('button[data-type]');
     if (!btn) return;
     const { type, id } = btn.dataset;
@@ -1804,6 +1923,7 @@ $('#view-manage').addEventListener('click', e => {
             }
             field.value = value;
         }
+        if (type === 'characters') setProfessionFields(item);
         form.querySelector('[type=submit]').textContent = 'Save';
         form.querySelector('.cancel').hidden = false;
         renderManage();

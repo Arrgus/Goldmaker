@@ -181,6 +181,10 @@ td.cell.done button.bump:hover { color: var(--text); }
 .price-input { width: 56px; margin: 2px 2px 0; padding: 1px 4px; font-size: 12px; color: var(--gold); }
 .price-input.inherited { color: var(--muted); font-style: italic; }
 .loot-input::placeholder, .price-input::placeholder { color: var(--border); }
+/* Professions: the gold made with each, under its name. */
+.grid td.prof { padding: 2px 4px 3px; }
+.prof-name { display: block; padding: 0 6px; font-size: 11px; line-height: 1.2; color: var(--muted); white-space: nowrap; }
+.prof-input { width: 80px; padding-top: 1px; padding-bottom: 1px; color: var(--gold); }
 input.invalid, input.invalid:hover { border: 1px solid var(--danger); }
 
 td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgba(255,255,255,.03) 6px 12px); color: var(--muted); font-size: 12px; }
@@ -320,6 +324,7 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .field > span { font-size: 12px; color: var(--muted); }
 .field.grow { flex: 1 1 140px; }
 .field.wide { flex: 1 1 100%; }
+.field-pair { display: flex; gap: 6px; }
 .field input::placeholder { color: var(--muted); opacity: .6; }
 .panel form input[name=level] { width: 70px; }
 .panel form input[name=gold] { width: 90px; }
@@ -335,6 +340,7 @@ td.cell.na { background: repeating-linear-gradient(45deg, transparent 0 6px, rgb
 .list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
 .list li .grow { flex: 1; }
 .list li button { padding: 2px 8px; font-size: 13px; }
+.list li button.sync-professions { padding: 0 0 0 10px; font-size: 12px; white-space: nowrap; }
 
 /* Narrower windows: History puts each week's characters on a line of their own. */
 @media (max-width: 1000px) {

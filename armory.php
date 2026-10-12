@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 // Blizzard Profile API client for the "sync" action in api.php: looks up each character's
-// level and class. Uses the client-credentials flow, so no Battle.net login is involved.
+// level and class. "syncProfessions" looks up one character's professions. Uses the client-credentials flow, so no Battle.net login is involved.
 // Errors that affect the whole sync throw RuntimeException; per-character problems are
 // returned as ['error' => ...] so one missing character doesn't stop the rest.
 
@@ -10,6 +10,7 @@ const ARMORY_TOKEN_FILE = DATA_DIR . '/blizzard-token.json';
 const REALM_INDEX_FILE = DATA_DIR . '/realm-index.json';
 const REALM_INDEX_TTL = 7 * 86400;
 const ARMORY_TIMEOUT = 10;
+const ARMORY_NOT_FOUND = 'Not found on the armory (renamed, transferred, or not logged in for a long time)';
 
 function armoryConfigured(): bool
 {
@@ -132,6 +133,20 @@ function fetchTokenPrice(): array
     return [$updated, intdiv($data['price'], 10000)];
 }
 
+// The Profile API path of a character, found through its realm's slug.
+function characterPath(array $char, array $slugs): string
+{
+    $realm = (string) ($char['realm'] ?? '');
+    $slug = $slugs[realmKey($realm)] ?? null;
+    if ($realm === '') {
+        throw new RuntimeException('No realm set');
+    }
+    if ($slug === null) {
+        throw new RuntimeException("Unknown realm \"$realm\"");
+    }
+    return "/profile/wow/character/$slug/" . rawurlencode(mb_strtolower((string) $char['name']));
+}
+
 /**
  * Looks up all characters in parallel.
  * @return array<string, array{level: int, class: string}|array{error: string}> keyed by character id
@@ -145,20 +160,17 @@ function fetchArmoryCharacters(array $characters): array
     $multi = curl_multi_init();
 
     foreach ($characters as $char) {
-        $realm = (string) ($char['realm'] ?? '');
-        $slug = $slugs[realmKey($realm)] ?? null;
-        if ($realm === '') {
-            $results[$char['id']] = ['error' => 'No realm set'];
-        } elseif ($slug === null) {
-            $results[$char['id']] = ['error' => "Unknown realm \"$realm\""];
-        } else {
-            $name = rawurlencode(mb_strtolower((string) $char['name']));
-            $ch = armoryHandle(armoryUrl("/profile/wow/character/$slug/$name", 'profile'), [
-                CURLOPT_HTTPHEADER => ["Authorization: Bearer $token"],
-            ]);
-            curl_multi_add_handle($multi, $ch);
-            $handles[$char['id']] = $ch;
+        try {
+            $path = characterPath($char, $slugs);
+        } catch (RuntimeException $e) {
+            $results[$char['id']] = ['error' => $e->getMessage()];
+            continue;
         }
+        $ch = armoryHandle(armoryUrl($path, 'profile'), [
+            CURLOPT_HTTPHEADER => ["Authorization: Bearer $token"],
+        ]);
+        curl_multi_add_handle($multi, $ch);
+        $handles[$char['id']] = $ch;
     }
 
     do {
@@ -175,7 +187,7 @@ function fetchArmoryCharacters(array $characters): array
         if ($code === 200 && is_int($data['level'] ?? null)) {
             $results[$id] = ['level' => $data['level'], 'class' => (string) ($data['character_class']['name'] ?? '')];
         } elseif ($code === 404) {
-            $results[$id] = ['error' => 'Not found on the armory (renamed, transferred, or not logged in for a long time)'];
+            $results[$id] = ['error' => ARMORY_NOT_FOUND];
         } elseif ($code === 0) {
             $results[$id] = ['error' => 'Could not reach Battle.net: ' . curl_error($ch)];
         } else {
@@ -186,4 +198,34 @@ function fetchArmoryCharacters(array $characters): array
         }
     }
     return $results;
+}
+
+// One character's primary professions, for the "syncProfessions" action: the names in PROFESSIONS
+// (api.php), at most MAX_PROFESSIONS. Asked for one character at a time from the Manage page, so
+// any failure throws. Secondary professions (Cooking, Fishing) are left out.
+/** @return list<string> */
+function fetchArmoryProfessions(array $char): array
+{
+    $token = armoryToken();
+    [$status, $data] = armoryRequest(armoryUrl(characterPath($char, realmSlugs($token)) . '/professions', 'profile'), [
+        CURLOPT_HTTPHEADER => ["Authorization: Bearer $token"],
+    ]);
+    if ($status === 404) {
+        throw new RuntimeException(ARMORY_NOT_FOUND);
+    }
+    if ($status !== 200 || !is_array($data)) {
+        if ($status === 401) {
+            @unlink(ARMORY_TOKEN_FILE); // token revoked early; fetch a new one next time
+        }
+        throw new RuntimeException("Armory error (HTTP $status)");
+    }
+    // A character without professions has no "primaries".
+    $names = [];
+    foreach ((array) ($data['primaries'] ?? []) as $primary) {
+        $name = is_array($primary) ? ($primary['profession']['name'] ?? null) : null;
+        if (in_array($name, PROFESSIONS, true) && !in_array($name, $names, true)) {
+            $names[] = $name;
+        }
+    }
+    return array_slice($names, 0, MAX_PROFESSIONS);
 }

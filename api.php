@@ -18,6 +18,10 @@ const FAILURE_WINDOW = 15 * 60;
 const MAX_LEVEL = 90;
 const AUTO_SYNC_INTERVAL = 6 * 3600; // app.js syncs on its own once lastSync is older than this
 const DEFAULT_RESERVE = 500000; // gold to keep in the bank after buying a goal
+// The primary professions; a character can have two. Same list as PROFESSIONS in app.js.
+const PROFESSIONS = ['Alchemy', 'Blacksmithing', 'Enchanting', 'Engineering', 'Herbalism', 'Inscription',
+    'Jewelcrafting', 'Leatherworking', 'Mining', 'Skinning', 'Tailoring'];
+const MAX_PROFESSIONS = 2;
 
 require __DIR__ . '/armory.php';
 
@@ -29,7 +33,7 @@ function emptyState(): array
     // No depositsFrom: a missing one is filled in from lastWeek (see depositsFrom).
     return [
         'characters' => [], 'activities' => [], 'completions' => new stdClass(), 'snapshots' => new stdClass(),
-        'deposits' => new stdClass(), 'loot' => new stdClass(), 'prices' => new stdClass(),
+        'deposits' => new stdClass(), 'loot' => new stdClass(), 'prices' => new stdClass(), 'professionGold' => new stdClass(),
         'bank' => null, 'charGold' => new stdClass(), 'goals' => [], 'reserve' => DEFAULT_RESERVE, 'balance' => null,
     ];
 }
@@ -109,7 +113,51 @@ function characterFields(array $in): array
         'realm' => text($in['realm'] ?? ''),
         'class' => text($in['class'] ?? ''),
         'level' => clampLevel($in['level'] ?? null, 80),
+        'professions' => professionList($in['professions'] ?? []),
     ];
+}
+
+// ---------- Professions ----------
+// A character can have up to two professions, set by hand. Each week the gold made with each one
+// is typed in on the Week page: week => charId => profession => gold.
+
+function professionList(mixed $professions): array
+{
+    if (!is_array($professions) || !array_is_list($professions)) {
+        fail('Bad professions');
+    }
+    $result = array_values(array_unique($professions, SORT_REGULAR));
+    foreach ($result as $name) {
+        if (!in_array($name, PROFESSIONS, true)) {
+            fail('Unknown profession "' . text($name) . '"');
+        }
+    }
+    if (count($result) > MAX_PROFESSIONS) {
+        fail('A character can have at most ' . MAX_PROFESSIONS . ' professions');
+    }
+    return $result;
+}
+
+function normalizeProfessionGold(mixed $professionGold): array
+{
+    $result = [];
+    foreach ((array) $professionGold as $week => $chars) {
+        if (!isWeekKey($week)) {
+            fail("Bad week \"$week\" in profession gold");
+        }
+        foreach ((array) $chars as $charId => $golds) {
+            if (!isId($charId, 'c')) {
+                fail("Bad character id \"$charId\" in profession gold");
+            }
+            foreach ((array) $golds as $name => $gold) {
+                if (!in_array($name, PROFESSIONS, true) || !is_int($gold) || $gold < 0) {
+                    fail("Bad profession gold for \"$charId\" in week $week");
+                }
+                $result[$week][$charId][$name] = $gold;
+            }
+        }
+    }
+    return $result;
 }
 
 function activityFields(array $in): array
@@ -643,6 +691,7 @@ function loadState(): array
     $state['deposits'] = normalizeDeposits($state['deposits']);
     $state['loot'] = normalizeLoot($state['loot']);
     $state['prices'] = normalizePrices($state['prices']);
+    $state['professionGold'] = normalizeProfessionGold($state['professionGold']);
     $state['bank'] = normalizeBank($state['bank']);
     $state['charGold'] = normalizeCharGold($state['charGold']);
     $state['reserve'] = normalizeReserve($state['reserve']);
@@ -821,18 +870,25 @@ if ($action === 'tokenHistory') {
 // The WoW Token price is looked up and logged the same way.
 $armory = [];
 $armoryError = null;
-if ($action === 'sync' || $action === 'tokenPrice') {
+if (in_array($action, ['sync', 'syncProfessions', 'tokenPrice'], true)) {
     if (!armoryConfigured()) {
         fail('Armory sync is not configured: set BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET');
     }
     try {
         if ($action === 'sync') {
             $armory = fetchArmoryCharacters(readStateSnapshot()['characters'] ?? []);
+        } elseif ($action === 'syncProfessions') {
+            $characters = readStateSnapshot()['characters'] ?? [];
+            $armory = fetchArmoryProfessions($characters[findIndex($characters, $in['id'] ?? null)]);
         } else {
             logTokenPrice(...fetchTokenPrice());
         }
     } catch (RuntimeException $e) {
         $armoryError = $e->getMessage();
+    }
+    // One character's professions are asked for by hand, so a failure is shown straight away.
+    if ($action === 'syncProfessions' && $armoryError !== null) {
+        fail($armoryError, 502);
     }
 }
 
@@ -982,6 +1038,24 @@ switch ($action) {
         }
         break;
 
+    case 'profession':
+        // Sets the gold a character made with a profession in a week; null removes it. A closed
+        // week's character may have had other professions, so they aren't checked against today's.
+        $week = $in['week'] ?? null;
+        $charId = $in['charId'] ?? null;
+        $name = $in['profession'] ?? null;
+        $gold = $in['gold'] ?? null;
+        if (!isWeekKey($week) || !isId($charId, 'c') || !in_array($name, PROFESSIONS, true)
+            || ($gold !== null && (!is_numeric($gold) || $gold < 0))) {
+            fail('Bad profession gold');
+        }
+        if ($gold === null) {
+            unsetPath($state['professionGold'], [$week, $charId, $name]);
+        } else {
+            $state['professionGold'][$week][$charId][$name] = (int) round((float) $gold);
+        }
+        break;
+
     case 'gold':
         // Sets the gold counted in the bank (no charId) or on a character; null clears it.
         $charId = $in['charId'] ?? null;
@@ -1063,6 +1137,7 @@ switch ($action) {
             'depositsFrom' => depositsFrom($data),
             'loot' => normalizeLoot($data['loot'] ?? []),
             'prices' => normalizePrices($data['prices'] ?? []),
+            'professionGold' => normalizeProfessionGold($data['professionGold'] ?? []),
             'bank' => normalizeBank($data['bank'] ?? null),
             'charGold' => normalizeCharGold($data['charGold'] ?? []),
             'goals' => normalizeGoals($data),
@@ -1101,6 +1176,12 @@ switch ($action) {
         $state['lastSyncError'] = $armoryError;
         break;
 
+    case 'syncProfessions':
+        // Looked up before the lock (see above); replaces the professions set by hand.
+        $i = findIndex($state['characters'], $in['id'] ?? null);
+        $state['characters'][$i]['professions'] = $armory;
+        break;
+
     default:
         fail('Unknown action');
 }
@@ -1116,6 +1197,7 @@ $state['snapshots'] = (object) $state['snapshots'];
 $state['deposits'] = (object) $state['deposits'];
 $state['loot'] = (object) $state['loot'];
 $state['prices'] = (object) $state['prices'];
+$state['professionGold'] = (object) $state['professionGold'];
 $state['charGold'] = (object) $state['charGold'];
 $state['armoryEnabled'] = armoryConfigured();
 $state['autoSyncInterval'] = AUTO_SYNC_INTERVAL;

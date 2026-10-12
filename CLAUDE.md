@@ -39,7 +39,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 
 ## Architecture
 
-**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `gold`, `goal`, `reserve`, `balance`, `import`, `sync`, `tokenPrice`, `tokenHistory`). Run from the command line with `log-token-price`, it logs the token price instead (see Armory sync).
+**`api.php`** is the whole backend: one script dispatched by `?action=` (`login`, `logout`, `state`, `saveCharacter`, `saveActivity`, `delete`, `move`, `toggle`, `deposit`, `price`, `profession`, `gold`, `goal`, `reserve`, `balance`, `import`, `sync`, `syncProfessions`, `tokenPrice`, `tokenHistory`). Run from the command line with `log-token-price`, it logs the token price instead (see Armory sync).
 - **Auth runs before the data file is opened.**
   - There is a single shared password. The `goldmaker_session` cookie holds `expiry.hmac`, keyed by that password, so there is no server-side session storage and changing the password signs everyone out. The cookie is renewed once it's more than halfway to expiry.
   - Every action except `state` must be a POST with a JSON content type (the CSRF defence, together with the SameSite=Lax cookie).
@@ -59,6 +59,7 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 - **Blizzard calls:** it uses client credentials and English (en_US) names, so classes match the `CLASSES` keys in `app.js`. Characters are fetched in parallel with `curl_multi`.
 - **Realm matching:** the stored realm is matched to a slug through the realm index, via `realmKey()`, which lowercases and strips everything but letters and numbers.
 - **Caching:** the OAuth token and the realm index are cached as JSON files in `DATA_DIR`.
+- **Professions** (`syncProfessions`, `fetchArmoryProfessions`): never part of the sync above. Each character's row under Manage has a "⟳ sync from armory" link that looks up that one character's `/professions` and replaces its professions with the `primaries` named in `PROFESSIONS` (secondaries like Cooking are left out). It runs before the lock like the sync but, being a single lookup asked for by hand, goes through the request queue, and any failure is a 502 shown in an alert, changing nothing. A character being edited in the form gets the synced professions in its selects. Not yet tried against the real API.
 - **Errors:** a failure for one character is saved as `syncError` on that character. A failure of the whole sync is saved as the top-level `lastSyncError`, and `lastSync` is set either way so a broken setup isn't retried constantly. `saveCharacter` rebuilds the character, which drops `syncError`.
 - **Extra response fields:** the API response adds `armoryEnabled`, `autoSyncInterval` and `tokenPrice`. They are never written to the file, and the export leaves them out.
 - **WoW Token price log:**
@@ -91,7 +92,8 @@ Goldmaker is a personal tracker for World of Warcraft weekly gold-making activit
 ## Data model (`goldmaker.json` in `DATA_DIR`)
 
 ```
-characters: [{id, name, realm, class, level, syncError?}]  // order = display order ("move" swaps neighbours)
+characters: [{id, name, realm, class, level, professions, syncError?}]  // order = display order ("move" swaps neighbours)
+                                                            // professions: up to 2 names from PROFESSIONS, see below
 activities: [{id, name, minLevel, notes, gold, materials}]  // gold = default reward; older entries may lack gold/materials
                                                             // materials: [{id: "m…", name}], see Loot below
 completions: { "<weekKey>": { "<charId>": { "<actId>": gold|null } } }
@@ -100,6 +102,7 @@ deposits: { "<weekKey>": { "<charId>": [{gold, time}] } }  // gold taken to the 
 depositsFrom: weekKey|null  // weeks before it count as banked
 loot: { "<weekKey>": { "<charId>": { "<actId>": { "<matId>": count } } } }  // materials a run dropped
 prices: { "<weekKey>": { "<matId>": gold } }  // AH price per item, see Loot below
+professionGold: { "<weekKey>": { "<charId>": { "<profession>": gold } } }  // see Professions below
 bank: {gold, time}|null  // gold counted in the bank, see Gold on hand below
 charGold: { "<charId>": {gold, time} }  // gold counted on each character
 goals: [{id: "g…", name, gold} | {id, name, euros}]  // what's being saved up for; the first is the current goal
@@ -134,6 +137,11 @@ lastSync?: unix time, lastSyncError?: string|null
   - **Not deposited:** the mats are sold from one character, so their value counts as earned (row totals show it as "+… in mats", and History includes it) but never as gold to deposit.
   - **Typing while replies arrive:** fields save on `focusout` when they differ from what was rendered (`defaultValue`). `setGrid` puts the focused field back after a re-render, keeping what was typed.
   - Validated on every load and on import, like completions.
+- **Professions.** A character can have up to two professions (`MAX_PROFESSIONS`), set by hand in its Manage form (two selects) or looked up for one character at a time (see Armory sync); the level sync leaves them alone. The names must be in `PROFESSIONS`, a list kept the same in `api.php` and `app.js` (the 11 primary professions), so they're safe as array keys and attributes. `saveCharacter` drops repeats.
+  - **Week page:** once a character shown has a profession, the grid gets a Professions group after the activities, one column per slot. Each cell shows the profession's name over a field for the gold it made that week; characters with fewer professions get empty cells. The fields behave like the loot fields (save on `focusout`, Enter/↓ and ↑ move within the column, Escape undoes) and are read with `parseGold` (`25` is 25k).
+  - **Saving:** the `profession` action sets `{week, charId, profession, gold}`; `null` removes it, 0 is kept. Whole gold, not kept to the hundred. The profession isn't checked against the character's current ones, since a closed week's snapshot may have others.
+  - **Counting:** profession gold is gold on the character, so it counts as earned *and* as gold to deposit (unlike mats). Only the professions the character had that week (its snapshot) count, like activities. The week's totals and History show it as "incl. … from professions"; it doesn't count towards Done.
+  - Validated on every load and on import, like completions.
 - **Gold on hand** (the Gold page). The bank and each character have a field for the gold the game shows, typed in by hand (`gold` action; no `charId` means the bank, `null` clears). `time` is when it was typed in.
   - A deposit adds its gold to the bank's count and undoing it takes it off (never below 0), without changing `time`. A bank with only deposits has `time: null`. The page shows how much was deposited since the last count.
   - The grand total (bank plus the characters that still exist) sits in the header (`#nav-total`) whenever anything is counted. Deleting a character drops its gold.
@@ -158,7 +166,7 @@ lastSync?: unix time, lastSyncError?: string|null
 ## Front-end conventions
 
 - **Week page layout:** the totals sit next to the week's dates (`weekSummary`). The grid ends with Done, Gold (mats on a line of their own, since they aren't deposited) and Bank (the Deposit button, left out for weeks before `depositsFrom`). Rows are kept to two lines so the 26-odd characters fit on fewer screens. The header, the footer and the character names stay in view while scrolling (sticky `thead`, `tfoot` cells and row headers), so on desktop the grid needs no scroll box of its own (touch screens are different, see below).
-- **Hiding Naxxramas:** a checkbox next to the week's totals hides the activities with loot (`materialsOf`) and every character left with nothing visible to do, which means those below level 80. A character who can do another activity stays. The week's totals and the footer's Done, Gold and Bank still count everything, so gold not yet deposited by a hidden character still shows. The setting is per browser (`localStorage`, `readSetting`/`writeSetting`), like "Count this week too" and the token chart's range.
+- **Hiding Naxxramas:** a checkbox next to the week's totals hides the activities with loot (`materialsOf`) and every character left with nothing visible to do, which means those below level 80 without professions. A character who can do another activity, or has a profession, stays. The week's totals and the footer's Done, Gold and Bank still count everything, so gold not yet deposited by a hidden character still shows. The setting is per browser (`localStorage`, `readSetting`/`writeSetting`), like "Count this week too" and the token chart's range.
 - **Small screens:** up to 900px the header is compact (one row on a tablet, two on a phone). Up to 1000px History puts each week's characters on their own line, and on phones each History row and each goal stacks onto several lines. The Manage panels have no minimum width beyond the screen's.
 - **Sideways scrolling:** the page itself scrolls sideways when the grid is wider than the window. `body { min-width: fit-content }` grows with it, so the header can be `position: sticky; left: 0` at `100cqw` (the window minus its scrollbar, with `html` as the query container). It stays in view sideways and scrolls away downwards. The containment stops the body background reaching the canvas, so `html` has the background too.
   - **Touch screens** (`pointer: coarse`) don't scroll a too-wide page the same way: the browser widens the layout viewport to the content (`innerWidth` becomes the grid's width) and pans the visual viewport, which sticky positioning can't follow, so the header slid away sideways. There `#grid` scrolls in a box of its own, at most `100dvh` high, and `body` drops its `min-width`, so the page is never wider than the screen. The grid's sticky header row, footer and names work inside the box. Check this kind of change in phone emulation (CDP `mobile: true` plus touch), not just a narrow desktop window.

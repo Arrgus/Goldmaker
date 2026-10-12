@@ -547,6 +547,47 @@ check('an import with a bad balance is refused', $status === 400 && file_get_con
 [, $state] = call('balance', ['euros' => null]);
 check('null clears the balance', $state['balance'] === null, $state['balance']);
 
+// ---------- Professions ----------
+
+[, $state] = call('saveCharacter', ['name' => 'Crafter', 'professions' => ['Alchemy', 'Herbalism', 'Alchemy']]);
+$crafter = end($state['characters']);
+check('a character keeps up to two professions, without repeats', $crafter['professions'] === ['Alchemy', 'Herbalism'], $crafter);
+[, $state] = call('saveCharacter', ['name' => 'No trade']);
+check('a character without professions has none', end($state['characters'])['professions'] === [], end($state['characters']));
+foreach ([['Alchemy', 'Mining', 'Skinning'], ['Cooking'], ['alchemy'], 'Alchemy', ['a' => 'Alchemy']] as $bad) {
+    [$status] = call('saveCharacter', ['name' => 'x', 'professions' => $bad]);
+    check('the professions ' . json_encode($bad) . ' are refused', $status === 400, $status);
+}
+
+$profGold = fn(array $extra) => call('profession', $extra + ['week' => $week, 'charId' => $crafter['id'], 'profession' => 'Alchemy']);
+[, $state] = $profGold(['gold' => '25250.4']);
+check('profession gold is whole gold, kept per week and profession', $state['professionGold'] === [$week => [$crafter['id'] => ['Alchemy' => 25250]]], $state['professionGold']);
+[, $state] = $profGold(['gold' => 0, 'profession' => 'Herbalism']);
+check('0 gold is kept', $state['professionGold'][$week][$crafter['id']]['Herbalism'] === 0, $state['professionGold']);
+$profGold(['gold' => null, 'profession' => 'Herbalism']);
+foreach ([['gold' => -1], ['gold' => 'x'], ['profession' => 'Cooking', 'gold' => 5], ['charId' => 'a123', 'gold' => 5], ['week' => '2026-09-24', 'gold' => 5]] as $bad) {
+    [$status] = $profGold($bad);
+    check('the profession gold ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+
+$export = json_decode(file_get_contents($dataFile), true);
+[$status, $state] = call('import', ['data' => $export]);
+check('an import keeps professions and their gold', $status === 200 && end($state['characters'])['professions'] === []
+    && $state['professionGold'] === [$week => [$crafter['id'] => ['Alchemy' => 25250]]], $status);
+$before = file_get_contents($dataFile);
+$badProfGold = $export;
+$badProfGold['professionGold'][$week][$crafter['id']]['Cooking'] = 100;
+$badProfession = $export;
+$badProfession['characters'][array_key_last($export['characters'])]['professions'] = ['Fishing'];
+foreach (['bad profession gold' => $badProfGold, 'an unknown profession' => $badProfession] as $what => $data) {
+    [$status] = call('import', ['data' => $data]);
+    check("an import with $what is refused", $status === 400 && file_get_contents($dataFile) === $before, $status);
+}
+[, $state] = $profGold(['gold' => null]);
+check('null removes profession gold', $state['professionGold'] === [], $state['professionGold']);
+[$status, $reply] = call('syncProfessions', ['id' => $crafter['id']]);
+check('syncing professions needs the Battle.net API', $status === 400 && str_contains($reply['error'] ?? '', 'not configured'), [$status, $reply]);
+
 // ---------- Signing out ----------
 
 call('logout', []);

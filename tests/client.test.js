@@ -346,6 +346,57 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     app(`state.activities = state.activities.filter(a => !a.materials); renderWeek()`);
     check('without loot activities there is no toggle', elements['#loot-toggle'].hidden);
 
+    // Professions: a field per profession on the character's row, counted as gold to deposit.
+    app(`state = {
+        characters: [{ id: 'c1', name: 'Crafter', level: 90, professions: ['Alchemy', 'Herbalism'] },
+            { id: 'c2', name: 'Lowbie', level: 70, professions: ['Mining'] }, { id: 'c3', name: 'Plain', level: 90 }],
+        activities: [{ id: 'a1', name: 'Weekly', minLevel: 80, gold: 1000 },
+            { id: 'a2', name: 'Naxx', minLevel: 80, gold: 300, materials: [{ id: 'm1', name: 'Scrap' }] }],
+        completions: { '2026-09-30': { c1: { a1: 1000 } } },
+        professionGold: { '2026-09-30': { c1: { Alchemy: 25000, Herbalism: 500, Mining: 999 }, c2: { Mining: 2000 } } },
+        snapshots: {}, deposits: { '2026-09-30': { c1: [{ gold: 1000, time: 0 }] } },
+    }; viewedWeek = '2026-09-30'; hideLoot = false; renderWeek()`);
+    const profStats = app(`weekStats('2026-09-30')`);
+    check('profession gold is earned and still to deposit', profStats.prof === 27500 && profStats.gold === 28500
+        && profStats.perChar[0].pending === 25500, JSON.stringify(profStats));
+    const profGrid = elements['#grid'].innerHTML;
+    check('a character gets a field per profession', /id="prof-c1-0"[^>]*data-prof="Alchemy"[^>]*value="25,000"/.test(profGrid)
+        && /id="prof-c1-1"[^>]*data-prof="Herbalism"[^>]*value="500"/.test(profGrid) && /id="prof-c2-0"[^>]*value="2,000"/.test(profGrid)
+        && !profGrid.includes('prof-c2-1') && !profGrid.includes('prof-c3-'), profGrid);
+    check('the grid has a Professions group over two columns', profGrid.includes('colspan="2" title="Gold made with professions')
+        && profGrid.includes('<td colspan="2"><span class="gold">27,500g</span></td>'));
+    app('hideLoot = true; renderWeek()');
+    check('a character with a profession stays when the loot is hidden', elements['#grid'].innerHTML.includes('Lowbie'));
+    app(`hideLoot = false; state.characters.forEach(c => delete c.professions); renderWeek()`);
+    check('without professions there are no profession columns', !elements['#grid'].innerHTML.includes('Professions'));
+
+    await reset();
+    log.length = 0;
+    context.field = field('25', { char: 'c1', prof: 'Alchemy', slot: '0' });
+    app(`viewedWeek = '2026-09-30'; saveProfession(field)`);
+    await sleep(20);
+    sent = log.find(e => e.action === 'profession')?.body;
+    check('a profession field saves its gold, reading "25" as 25k', JSON.stringify(sent)
+        === JSON.stringify({ week: '2026-09-30', charId: 'c1', profession: 'Alchemy', gold: 25000 }), JSON.stringify(sent));
+    context.field = field('', { char: 'c1', prof: 'Alchemy', slot: '0' });
+    log.length = 0;
+    app('saveProfession(field)');
+    await sleep(20);
+    check('an emptied profession field removes its gold', log.find(e => e.action === 'profession')?.body.gold === null);
+
+    // A character's professions are synced from its own button, never with the levels.
+    await reset();
+    check('each character has a button to sync its professions', elements['#char-list'].innerHTML.includes('data-sync-professions="c1"'));
+    const syncButton = { dataset: { syncProfessions: 'c1' } };
+    elements['#view-manage'].fire('click', { target: { closest: sel => sel === 'button[data-sync-professions]' ? syncButton : null } });
+    await sleep(20);
+    sent = log.find(e => e.event === 'send' && e.action === 'syncProfessions');
+    check('the button syncs that character only', JSON.stringify(sent?.body) === '{"id":"c1"}' && app('professionSyncs.size') === 0,
+        JSON.stringify(sent?.body));
+    check('the levels\' sync leaves professions alone', !log.some(e => e.action === 'sync'));
+    app('state.armoryEnabled = false; renderManage()');
+    check('without the Battle.net API there is no button', !elements['#char-list'].innerHTML.includes('data-sync-professions'));
+
     // The Battle.net Balance pays for goals in euros first; on top of the current goal, only what it
     // leaves over counts.
     app(`state = { characters: [], bank: { gold: 600, time: 1 }, reserve: 0, tokenPrice: { gold: 300, time: 1 }, balance: { euros: 13, time: 1 },
