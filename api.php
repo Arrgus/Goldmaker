@@ -18,6 +18,7 @@ const FAILURE_WINDOW = 15 * 60;
 const MAX_LEVEL = 90;
 const AUTO_SYNC_INTERVAL = 6 * 3600; // app.js syncs on its own once lastSync is older than this
 const DEFAULT_RESERVE = 500000; // gold to keep in the bank after buying a goal
+const TOKEN_EUROS = 13; // the Battle.net Balance a WoW Token gives in the EU, as in app.js
 // The primary professions; a character can have two. Same list as PROFESSIONS in app.js.
 const PROFESSIONS = ['Alchemy', 'Blacksmithing', 'Enchanting', 'Engineering', 'Herbalism', 'Inscription',
     'Jewelcrafting', 'Leatherworking', 'Mining', 'Skinning', 'Tailoring'];
@@ -306,6 +307,44 @@ function unsetPath(array &$map, array $keys): void
     unset($map[$key]);
 }
 
+// Ticks or unticks a character's run of an activity (the "toggle" action, and "toggleColumn" for
+// every character at once). $in holds "done" and optionally "gold" and "loot".
+function toggleCell(array &$state, mixed $week, mixed $charId, mixed $actId, array $in): void
+{
+    if (!isWeekKey($week) || !isId($charId, 'c') || !isId($actId, 'a')) {
+        fail('Bad toggle');
+    }
+    $entries = $state['completions'][$week][$charId] ?? [];
+    if (!empty($in['done'])) {
+        // Snapshot the gold so later changes to the activity's default don't rewrite history.
+        // A run that's already done keeps its gold unless new gold is sent (a loot field saved).
+        if (is_numeric($in['gold'] ?? null)) {
+            $entries[$actId] = hasLoot($state, $actId) ? max(0, (int) round((float) $in['gold'])) : goldAmount($in['gold']);
+        } elseif (!array_key_exists($actId, $entries)) {
+            $act = $state['activities'][findIndex($state['activities'], $actId)];
+            $entries[$actId] = (int) ($act['gold'] ?? 0);
+        }
+        // The Week page sends the loot fields one at a time, so only the materials sent change
+        // and a count of 0 removes one. A plain tick leaves the loot as it was.
+        if (array_key_exists('loot', $in)) {
+            $counts = array_filter(array_replace($state['loot'][$week][$charId][$actId] ?? [], lootCounts($in['loot'], true)));
+            if ($counts) {
+                $state['loot'][$week][$charId][$actId] = $counts;
+            } else {
+                unsetPath($state['loot'], [$week, $charId, $actId]);
+            }
+        }
+    } else {
+        unset($entries[$actId]);
+        unsetPath($state['loot'], [$week, $charId, $actId]);
+    }
+    if ($entries) {
+        $state['completions'][$week][$charId] = $entries;
+    } else {
+        unsetPath($state['completions'], [$week, $charId]);
+    }
+}
+
 // Completions are stored as week => charId => [actId => gold]. Older data used a plain
 // list of actIds; convert those with null gold, meaning "use the activity's default".
 function normalizeCompletions(mixed $completions): array
@@ -484,10 +523,13 @@ function normalizeGoals(array $data): array
             (is_int($euros) || is_float($euros)) && $euros > 0 && $gold === null => ['euros' => $euros],
             default => null,
         };
-        if (!isId($id, 'g') || in_array($id, array_column($result, 'id'), true) || $price === null) {
+        // topUp: the euros a whole token doesn't cover are paid out of pocket (goalCost in app.js).
+        $topUp = $goal['topUp'] ?? false;
+        if (!isId($id, 'g') || in_array($id, array_column($result, 'id'), true) || $price === null
+            || !is_bool($topUp) || ($topUp && $euros === null)) {
             fail('Bad or duplicate goal');
         }
-        $result[] = ['id' => $id, 'name' => text($goal['name'] ?? '')] + $price;
+        $result[] = ['id' => $id, 'name' => text($goal['name'] ?? '')] + $price + ($topUp ? ['topUp' => true] : []);
     }
     return $result;
 }
@@ -950,43 +992,19 @@ switch ($action) {
         break;
 
     case 'toggle':
-        $week = $in['week'] ?? null;
-        $charId = $in['charId'] ?? null;
-        $actId = $in['actId'] ?? null;
-        if (!isWeekKey($week) || !isId($charId, 'c') || !isId($actId, 'a')) {
+        toggleCell($state, $in['week'] ?? null, $in['charId'] ?? null, $in['actId'] ?? null, $in);
+        break;
+
+    case 'toggleColumn':
+        // Ticks or unticks an activity for several characters at once, with the same gold for each
+        // (the rotating weeklies: one of them can't be done by characters already at the cap).
+        $charIds = $in['charIds'] ?? null;
+        if (!is_array($charIds) || !$charIds || !array_is_list($charIds)) {
             fail('Bad toggle');
         }
-        $entries = $state['completions'][$week][$charId] ?? [];
-        if (!empty($in['done'])) {
-            // Snapshot the gold so later changes to the activity's default don't rewrite history.
-            // A run that's already done keeps its gold unless new gold is sent (a loot field saved).
-            if (is_numeric($in['gold'] ?? null)) {
-                $entries[$actId] = hasLoot($state, $actId) ? max(0, (int) round((float) $in['gold'])) : goldAmount($in['gold']);
-            } elseif (!array_key_exists($actId, $entries)) {
-                $act = $state['activities'][findIndex($state['activities'], $actId)];
-                $entries[$actId] = (int) ($act['gold'] ?? 0);
-            }
-            // The Week page sends the loot fields one at a time, so only the materials sent change
-            // and a count of 0 removes one. A plain tick leaves the loot as it was.
-            if (array_key_exists('loot', $in)) {
-                $counts = array_filter(array_replace($state['loot'][$week][$charId][$actId] ?? [], lootCounts($in['loot'], true)));
-                if ($counts) {
-                    $state['loot'][$week][$charId][$actId] = $counts;
-                } else {
-                    unsetPath($state['loot'], [$week, $charId, $actId]);
-                }
-            }
-        } else {
-            unset($entries[$actId]);
-            unsetPath($state['loot'], [$week, $charId, $actId]);
-        }
-        if ($entries) {
-            $state['completions'][$week][$charId] = $entries;
-        } else {
-            unset($state['completions'][$week][$charId]);
-            if (empty($state['completions'][$week])) {
-                unset($state['completions'][$week]);
-            }
+        $cell = ['done' => !empty($in['done'])] + (array_key_exists('gold', $in) ? ['gold' => $in['gold']] : []);
+        foreach ($charIds as $charId) {
+            toggleCell($state, $in['week'] ?? null, $charId, $in['actId'] ?? null, $cell);
         }
         break;
 
@@ -1080,6 +1098,8 @@ switch ($action) {
         // "add" puts a new goal at the end of the list. With an id, "remove" deletes that goal,
         // "first" makes it the current one, and otherwise the fields sent change: the Gold page
         // sends them one at a time, like the loot fields. Gold or euros replace the price either way.
+        // "topUp" (goals in euros only) pays what a whole token doesn't cover out of pocket; a new
+        // price in euros keeps it.
         if (!empty($in['add'])) {
             $state['goals'][] = ['id' => newId('g'), 'name' => text($in['name'] ?? '')] + goalPrice($in);
             break;
@@ -1095,7 +1115,16 @@ switch ($action) {
                 $goal['name'] = text($in['name']);
             }
             if (array_key_exists('gold', $in) || array_key_exists('euros', $in)) {
-                $goal = ['id' => $goal['id'], 'name' => $goal['name']] + goalPrice($in);
+                $price = goalPrice($in);
+                $goal = ['id' => $goal['id'], 'name' => $goal['name']] + $price
+                    + (isset($price['euros']) && !empty($goal['topUp']) ? ['topUp' => true] : []);
+            }
+            if (array_key_exists('topUp', $in)) {
+                if (!is_bool($in['topUp']) || !isset($goal['euros'])) {
+                    fail('Only a goal in euros can be topped up');
+                }
+                unset($goal['topUp']);
+                $goal += $in['topUp'] ? ['topUp' => true] : [];
             }
             $state['goals'][$i] = $goal;
         }
@@ -1114,6 +1143,19 @@ switch ($action) {
         // The Battle.net Balance in euros; null clears it.
         $euros = $in['euros'] ?? null;
         $state['balance'] = $euros === null ? null : ['euros' => balanceEuros($euros), 'time' => time()];
+        break;
+
+    case 'buyToken':
+        // A WoW Token bought with gold from the bank: its Balance is added and the gold it cost is
+        // taken off the bank's count (never below 0), keeping the time the bank was last counted.
+        $gold = $in['gold'] ?? null;
+        if (!is_numeric($gold) || $gold < 0) {
+            fail('Bad token price');
+        }
+        $state['balance'] = ['euros' => balanceEuros(($state['balance']['euros'] ?? 0) + TOKEN_EUROS), 'time' => time()];
+        if ($state['bank'] !== null) {
+            $state['bank']['gold'] = max(0, $state['bank']['gold'] - (int) round((float) $gold));
+        }
         break;
 
     case 'tokenPrice':

@@ -458,7 +458,7 @@ function renderWeek() {
         const notes = a.notes ? ` title="${esc(a.notes)}"` : '';
         const typical = a.gold ? `<span class="req">~${fmtShort(a.gold)}</span>` : '';
         if (!mats.length) {
-            head += `<th${span}${notes}>${esc(a.name)}<span class="lvl">${reqBadge(a)}${typical}</span></th>`;
+            head += `<th${span}${notes}>${esc(a.name)}<span class="lvl">${reqBadge(a)}${typical}</span>${tickColumnButton(a, chars)}</th>`;
             continue;
         }
         head += `<th class="group" colspan="${mats.length + 2}"${notes}>${esc(a.name)}<span class="lvl">${reqBadge(a)}</span></th>`;
@@ -525,6 +525,17 @@ function professionCells(c, count) {
             + ` inputmode="decimal" autocomplete="off" title="${esc(c.name)}: gold made with ${esc(p)} this week"></td>`;
     }
     return html;
+}
+
+// Under an activity's name: ticks it for every character who can do it and hasn't, or once they all
+// have, unticks it for all of them. Not for activities with loot, whose runs are filled in one by one.
+function tickColumnButton(act, chars) {
+    const able = chars.filter(c => eligible(c, act));
+    if (!able.length) return '';
+    const all = able.every(c => isDone(viewedWeek, c.id, act.id));
+    return all
+        ? `<button class="tick-column" data-tick-column="${act.id}" title="Untick ${esc(act.name)} for every character">○ all</button>`
+        : `<button class="tick-column" data-tick-column="${act.id}" title="Tick ${esc(act.name)} for every character who hasn't done it, with the same gold for each (0 for a weekly they can't do)">✔ all</button>`;
 }
 
 // Next to the week's dates: what was done, earned and is still to take to the bank.
@@ -723,14 +734,19 @@ const RESERVE_SLACK = 0.25;
 
 // What a goal costs in gold: its gold, or the tokens for its euros at the last known price. The
 // Battle.net Balance from tokens already bought (euros) pays for what it can first. gold is null
-// while there's no price yet, unless the balance covers it all.
+// while there's no price yet, unless the balance covers it all. Tokens can't be split, so the rest
+// either takes one more token, or with the goal's topUp is paid out of pocket (ownEuros). odd is
+// that part a whole token doesn't cover, either way, for the switch between the two.
 function goalCost(goal, balance = state.balance?.euros || 0) {
-    if (goal.euros == null) return { gold: goal.gold, tokens: null, fromBalance: 0 };
+    if (goal.euros == null) return { gold: goal.gold, tokens: null, fromBalance: 0, ownEuros: 0, odd: 0 };
     const cents = Math.round(goal.euros * 100);
     const fromBalance = Math.min(cents, Math.round(balance * 100));
-    const tokens = Math.ceil((cents - fromBalance) / (TOKEN_EUROS * 100));
+    const rest = cents - fromBalance;
+    const odd = rest % (TOKEN_EUROS * 100);
+    const tokens = Math.floor(rest / (TOKEN_EUROS * 100)) + (odd && !goal.topUp ? 1 : 0);
     const price = state.tokenPrice?.gold;
-    return { gold: !tokens ? 0 : price ? tokens * price : null, tokens, fromBalance: fromBalance / 100 };
+    return { gold: !tokens ? 0 : price ? tokens * price : null, tokens, fromBalance: fromBalance / 100,
+        ownEuros: goal.topUp ? odd / 100 : 0, odd: odd / 100 };
 }
 
 // Progress towards each goal. Every goal also needs the reserve to stay in the bank once it's
@@ -875,33 +891,45 @@ function renderGoals() {
 
 // A goal's row: its name and price, which save when they're left, its progress and how many
 // weeks it's likely to take.
-function goalRow({ goal, gold, tokens, fromBalance, alone, onTop }, i, average) {
+function goalRow({ goal, gold, tokens, fromBalance, ownEuros, odd, alone, onTop }, i, average) {
     const ids = `data-id="${goal.id}"`;
     const price = goal.euros == null ? goal.gold.toLocaleString('en-US') : fmtEuros(goal.euros);
     return `<tr${i ? '' : ' class="current"'}><th>${i ? 'Later' : 'Current'}</th>`
         + `<td><input class="goal-input" id="goal-name-${goal.id}" ${ids} data-field="name" value="${esc(goal.name)}"`
         + ` placeholder="${goalName({}, i)}" autocomplete="off"></td>`
         + `<td><input class="goal-input count-input" id="goal-gold-${goal.id}" ${ids} data-field="gold" value="${price}"`
-        + ` inputmode="decimal" autocomplete="off" title="Gold, or a real-money price in euros (e.g. 25€)">${goalCostNote(gold, tokens, fromBalance)}</td>`
+        + ` inputmode="decimal" autocomplete="off" title="Gold, or a real-money price in euros (e.g. 25€)">${goalCostNote(gold, tokens, fromBalance, ownEuros)}${topUpSwitch(goal, tokens, odd)}</td>`
         + `<td>${goalProgressCell(alone, onTop, goalWeeks(alone, onTop, average))}</td>`
         + `<td class="goal-buttons">${i ? `<button data-goal-first="${goal.id}" title="Save up for this one now">Make current</button>` : ''}`
         + `<button class="danger" data-goal-remove="${goal.id}" title="Remove this goal">Remove</button></td></tr>`;
 }
 
 // Under a goal in euros: what the Battle.net Balance pays, the tokens for the rest at today's price,
-// and what they'd cost at a good price (see goodTokenPrice).
-function goalCostNote(gold, tokens, fromBalance) {
+// the euros paid out of pocket instead of one more token, and what the tokens would cost at a good
+// price (see goodTokenPrice).
+function goalCostNote(gold, tokens, fromBalance, ownEuros) {
     if (tokens == null) return '';
     const lines = [];
     if (fromBalance) lines.push(`${fmtEuros(fromBalance)} from Balance`);
-    if (tokens || !fromBalance) {
-        lines.push(`${fromBalance ? '+ ' : ''}${tokens} token${tokens === 1 ? '' : 's'}${gold == null ? '' : ` = ${fmtGold(gold)}`}`);
+    if (tokens || (!fromBalance && !ownEuros)) {
+        lines.push(`${lines.length ? '+ ' : ''}${tokens} token${tokens === 1 ? '' : 's'}${gold == null ? '' : ` = ${fmtGold(gold)}`}`);
     }
+    if (ownEuros) lines.push(`${lines.length ? '+ ' : ''}${fmtEuros(ownEuros)} out of pocket`);
     const good = goodTokenPrice();
     const price = state.tokenPrice?.gold;
     const dip = tokens && good && price && good < price
         ? `<span class="goal-cost dip" title="At a good price: the cheapest 10% of the last 30 days">≈ ${fmtGold(tokens * good)} at a good price</span>` : '';
     return lines.map(line => `<span class="goal-cost">${line}</span>`).join('') + dip;
+}
+
+// Under a goal in euros whose tokens don't come out even: pay the part a whole token doesn't cover
+// out of pocket instead of buying one more token, which can take a week or two more of gold.
+function topUpSwitch(goal, tokens, odd) {
+    if (tokens == null || (!odd && !goal.topUp)) return '';
+    const label = odd ? `Pay the last ${fmtEuros(odd)} myself` : 'Pay any leftover myself';
+    const title = `Instead of buying one more token for the ${fmtEuros(odd)} that whole tokens don't cover`;
+    return `<label class="toggle goal-top-up"${odd ? ` title="${esc(title)}"` : ''}><input type="checkbox" data-goal-top-up="${goal.id}"`
+        + `${goal.topUp ? ' checked' : ''}><span>${label}</span></label>`;
 }
 
 // Weeks of average earnings until a goal is reached, under its progress. For a later goal, until
@@ -1068,6 +1096,7 @@ function tokenSection() {
     const notes = [];
     if (!state.armoryEnabled) notes.push('The Battle.net API isn\'t set up on the server, so the price isn\'t looked up.');
     if (state.tokenPriceError) notes.push(`<span class="sync-error">Last lookup failed: ${esc(state.tokenPriceError)}</span>`);
+    const buy = `<button id="token-buy" title="Add a token's ${TOKEN_EUROS}€ to the Battle.net Balance and take the gold it cost off the bank">Buy a token</button>`;
     const refresh = state.armoryEnabled ? `<button id="token-refresh"${tokenPriceRun ? ' disabled' : ''}`
         + ` title="Look up the price now. The server also does every few minutes.">${tokenPriceRun ? 'Refreshing…' : 'Refresh'}</button>` : '';
     return `<section class="token">
@@ -1081,7 +1110,7 @@ function tokenSection() {
                 <input class="goal-input count-input" id="token-balance" data-field="balance" value="${balance ? fmtEuros(balance.euros) : ''}"
                     placeholder="none" inputmode="decimal" autocomplete="off" title="Balance from tokens already bought, in euros. Goals in euros use it first.">
                 <span class="muted">${balance ? `updated ${ago(balance.time)}` : 'from tokens already bought'}</span></div>
-            <div class="token-refresh">${refresh}</div>
+            <div class="token-refresh">${buy}${refresh}</div>
         </div>
         ${price && good && price.gold <= good ? '<p class="token-good">▼ A good time to buy: the price is in the cheapest 10% of the last 30 days.</p>' : ''}
         ${notes.length ? `<p class="muted">${notes.join(' ')}</p>` : ''}
@@ -1646,6 +1675,11 @@ $('#grid').addEventListener('click', e => {
         }
         return;
     }
+    const column = e.target.closest('button[data-tick-column]');
+    if (column) {
+        tickColumn(column.dataset.tickColumn);
+        return;
+    }
     const btn = e.target.closest('button[data-char]');
     if (!btn) return;
     const { char, act } = btn.dataset;
@@ -1667,6 +1701,40 @@ $('#grid').addEventListener('click', e => {
         });
     }
 });
+
+// Ticks an activity for every character who can do it and hasn't yet, with the same gold for each.
+// One of the rotating weeklies can't be done by characters already at the cap when the week began,
+// so they're ticked at 0. Once everyone has done it, it unticks the activity for all of them instead.
+function tickColumn(actId) {
+    const { characters, activities, live } = weekSetup(viewedWeek);
+    const act = activities.find(a => a.id === actId);
+    if (!act || materialsOf(act).length) return;
+    const able = characters.filter(c => eligible(c, act));
+    const left = able.filter(c => !isDone(viewedWeek, c.id, act.id));
+    if (!left.length) {
+        if (able.length && confirm(`Untick ${act.name} for all ${able.length} characters?
+
+The gold recorded for it this week will be removed.`)) {
+            api('toggleColumn', { week: viewedWeek, actId, charIds: able.map(c => c.id), done: false }).catch(() => {});
+        }
+        return;
+    }
+    const who = left.length === 1 ? 'the 1 character' : `the ${left.length} characters`;
+    const answer = prompt(`Tick ${act.name} for ${who} who haven't done it.
+
+`
+        + `Gold for each (empty for the default, ${fmtGold(act.gold || 0)}):`, '0');
+    if (answer === null) return;
+    const gold = parseGold(answer);
+    if (Number.isNaN(gold)) {
+        alert(`"${answer}" isn't an amount of gold.`);
+        return;
+    }
+    // Like a single tick, a closed week's default comes from its own setup (see the click handler).
+    const body = { week: viewedWeek, actId, charIds: left.map(c => c.id), done: true };
+    if (gold != null || !live) body.gold = gold ?? (act.gold || 0);
+    api('toggleColumn', body).catch(() => {});
+}
 
 // Gold a cell's arrows have asked for but whose reply hasn't come back yet, by "week.charId.actId".
 // Quick clicks build on it rather than on the state, which only catches up with the replies.
@@ -1863,6 +1931,8 @@ $('#goals').addEventListener('click', e => {
     if (!btn) return;
     if (btn.id === 'token-refresh') {
         lookUpTokenPrice();
+    } else if (btn.id === 'token-buy') {
+        buyToken();
     } else if (btn.dataset.tokenRange) {
         tokenRange = btn.dataset.tokenRange;
         writeSetting('goldmaker.tokenRange', tokenRange);
@@ -1880,6 +1950,10 @@ $('#goals').addEventListener('click', e => {
 });
 
 $('#goals').addEventListener('change', e => {
+    if (e.target.dataset.goalTopUp) {
+        api('goal', { id: e.target.dataset.goalTopUp, topUp: e.target.checked }).catch(() => {});
+        return;
+    }
     if (e.target.id !== 'count-this-week') return;
     countThisWeek = e.target.checked;
     writeSetting('goldmaker.countThisWeek', countThisWeek ? '1' : '0');
@@ -1896,6 +1970,24 @@ $('#goals').addEventListener('pointerout', e => {
     const plot = e.target.closest('.token-plot');
     if (plot && !plot.contains(e.relatedTarget)) plot.classList.remove('hovering');
 });
+
+// A WoW Token bought with gold from the bank: the server adds its Balance and takes the gold off
+// the bank's count. What it cost can differ from the last price looked up, so it's asked for.
+function buyToken() {
+    const price = state.tokenPrice?.gold;
+    const bank = state.bank ? `the bank (${fmtGold(state.bank.gold)})` : 'the bank (not counted, so it stays as it is)';
+    const answer = prompt(`Buy a WoW Token for ${TOKEN_EUROS}€ of Battle.net Balance.
+
+Gold it cost, taken off ${bank}:`,
+        price ? price.toLocaleString('en-US') : '');
+    if (answer === null) return;
+    const gold = parsePrice(answer);
+    if (gold == null || Number.isNaN(gold)) {
+        alert(`"${answer}" isn't an amount of gold.`);
+        return;
+    }
+    api('buyToken', { gold }).catch(() => {});
+}
 
 let addingGoal = false; // so a double click or a repeated Enter adds the goal once
 

@@ -442,6 +442,23 @@ foreach ([['euros' => 0], ['euros' => 'lots'], ['euros' => -5]] as $bad) {
     [$status] = call('goal', ['id' => $gameTime] + $bad);
     check('the goal price ' . json_encode($bad) . ' is refused', $status === 400, $status);
 }
+[, $state] = call('goal', ['id' => $gameTime, 'topUp' => true]);
+check('a goal in euros can be topped up out of pocket', end($state['goals']) === ['id' => $gameTime, 'name' => 'Game time', 'euros' => 13, 'topUp' => true], end($state['goals']));
+[, $state] = call('goal', ['id' => $gameTime, 'euros' => 79.3]);
+check('a new price in euros keeps the top-up', (end($state['goals'])['topUp'] ?? null) === true, end($state['goals']));
+[, $state] = call('goal', ['id' => $gameTime, 'topUp' => false]);
+check('the top-up can be turned off', end($state['goals']) === ['id' => $gameTime, 'name' => 'Game time', 'euros' => 79.3], end($state['goals']));
+call('goal', ['id' => $gameTime, 'topUp' => true]);
+[, $state] = call('goal', ['id' => $gameTime, 'gold' => 900000]);
+check('a price in gold drops the top-up', end($state['goals']) === ['id' => $gameTime, 'name' => 'Game time', 'gold' => 900000], end($state['goals']));
+foreach ([['id' => $gameTime, 'topUp' => true], ['id' => $mount, 'topUp' => true]] as $bad) {
+    [$status] = call('goal', $bad);
+    check('topping up a goal in gold is refused', $status === 400, $status);
+}
+call('goal', ['id' => $gameTime, 'euros' => 13]);
+[$status] = call('goal', ['id' => $gameTime, 'topUp' => 'yes']);
+check('a top-up that is not true or false is refused', $status === 400, $status);
+call('goal', ['id' => $gameTime, 'topUp' => true]);
 
 [, $state] = call('state');
 check('the reserve starts at 500k', $state['reserve'] === 500000 && $state['tokenPrice'] === null, [$state['reserve'], $state['tokenPrice']]);
@@ -467,7 +484,9 @@ $bothPrices = $export;
 $bothPrices['goals'][0]['euros'] = 10;
 $badReserve = $export;
 $badReserve['reserve'] = -1;
-foreach (['a goal with both gold and euros' => $bothPrices, 'a bad reserve' => $badReserve] as $what => $data) {
+$goldTopUp = $export;
+$goldTopUp['goals'][0]['topUp'] = true;
+foreach (['a goal with both gold and euros' => $bothPrices, 'a bad reserve' => $badReserve, 'a goal in gold topped up' => $goldTopUp] as $what => $data) {
     [$status] = call('import', ['data' => $data]);
     check("an import with $what is refused", $status === 400 && file_get_contents($dataFile) === $before, $status);
 }
@@ -547,6 +566,24 @@ check('an import with a bad balance is refused', $status === 400 && file_get_con
 [, $state] = call('balance', ['euros' => null]);
 check('null clears the balance', $state['balance'] === null, $state['balance']);
 
+call('gold', ['gold' => null]);
+[, $state] = call('buyToken', ['gold' => 300000]);
+check('buying a token adds its Balance and leaves an uncounted bank alone', $state['balance']['euros'] === 13
+    && is_int($state['balance']['time']) && $state['bank'] === null, [$state['balance'], $state['bank']]);
+call('gold', ['gold' => 1000000]);
+$bankTime = call('state')[1]['bank']['time'];
+[, $state] = call('buyToken', ['gold' => '312345.6']);
+check('buying a token takes the gold it cost off the bank, keeping the time it was counted', $state['balance']['euros'] === 26
+    && $state['bank'] === ['gold' => 687654, 'time' => $bankTime], [$state['balance'], $state['bank']]);
+[, $state] = call('buyToken', ['gold' => 900000]);
+check('buying a token never takes the bank below 0', $state['bank']['gold'] === 0 && $state['balance']['euros'] === 39, $state['bank']);
+foreach ([[], ['gold' => -1], ['gold' => 'lots']] as $bad) {
+    [$status] = call('buyToken', $bad);
+    check('buying a token for ' . json_encode($bad) . ' is refused', $status === 400, $status);
+}
+call('balance', ['euros' => null]);
+call('gold', ['gold' => null]);
+
 // ---------- Professions ----------
 
 [, $state] = call('saveCharacter', ['name' => 'Crafter', 'professions' => ['Alchemy', 'Herbalism', 'Alchemy']]);
@@ -587,6 +624,31 @@ foreach (['bad profession gold' => $badProfGold, 'an unknown profession' => $bad
 check('null removes profession gold', $state['professionGold'] === [], $state['professionGold']);
 [$status, $reply] = call('syncProfessions', ['id' => $crafter['id']]);
 check('syncing professions needs the Battle.net API', $status === 400 && str_contains($reply['error'] ?? '', 'not configured'), [$status, $reply]);
+
+// ---------- Ticking a whole column ----------
+
+[, $state] = call('saveActivity', ['name' => 'Rotating weekly', 'minLevel' => 1, 'gold' => 5000]);
+$weekly = end($state['activities']);
+$noTrade = end($state['characters']);
+$column = fn(array $extra) => call('toggleColumn', $extra + ['week' => $week, 'actId' => $weekly['id'], 'done' => true]);
+call('toggle', ['week' => $week, 'charId' => $crafter['id'], 'actId' => $weekly['id'], 'done' => true, 'gold' => 7000]);
+[, $state] = $column(['charIds' => [$noTrade['id']], 'gold' => 0]);
+check('ticking a column gives each character the gold sent, leaving the others alone',
+    $state['completions'][$week][$noTrade['id']][$weekly['id']] === 0 && $state['completions'][$week][$crafter['id']][$weekly['id']] === 7000,
+    $state['completions'][$week]);
+[, $state] = $column(['charIds' => [$noTrade['id'], $crafter['id']], 'done' => false]);
+check('unticking a column removes every run', !isset($state['completions'][$week][$noTrade['id']])
+    && !isset($state['completions'][$week][$crafter['id']]), $state['completions']);
+[, $state] = $column(['charIds' => [$noTrade['id'], $crafter['id']]]);
+check("ticking a column without gold gives the activity's default", $state['completions'][$week][$crafter['id']][$weekly['id']] === 5000
+    && $state['completions'][$week][$noTrade['id']][$weekly['id']] === 5000, $state['completions'][$week]);
+$column(['charIds' => [$noTrade['id'], $crafter['id']], 'done' => false]);
+$before = file_get_contents($dataFile);
+foreach ([[], ['charIds' => []], ['charIds' => $crafter['id']], ['charIds' => ['x' => $crafter['id']]],
+    ['charIds' => [$crafter['id'], 'a123']], ['charIds' => [$crafter['id']], 'week' => '2026-09-24']] as $bad) {
+    [$status] = $column($bad);
+    check('ticking a column with ' . json_encode($bad) . ' is refused, changing nothing', $status === 400 && file_get_contents($dataFile) === $before, $status);
+}
 
 // ---------- Signing out ----------
 

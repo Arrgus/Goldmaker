@@ -401,12 +401,16 @@ const showingData = () => !elements.main.hidden || app('state.characters.length'
     // leaves over counts.
     app(`state = { characters: [], bank: { gold: 600, time: 1 }, reserve: 0, tokenPrice: { gold: 300, time: 1 }, balance: { euros: 13, time: 1 },
         goals: [{ id: 'g1', name: 'Sub', euros: 20 }, { id: 'g2', name: 'Game', euros: 26 }] }`);
-    check('the balance pays first, then whole tokens', JSON.stringify(app('goalCost(state.goals[0])')) === '{"gold":300,"tokens":1,"fromBalance":13}',
+    check('the balance pays first, then whole tokens', JSON.stringify(app('goalCost(state.goals[0])')) === '{"gold":300,"tokens":1,"fromBalance":13,"ownEuros":0,"odd":7}',
         JSON.stringify(app('goalCost(state.goals[0])')));
+    check('a topped-up goal pays what whole tokens leave out of pocket', JSON.stringify(app('goalCost({ euros: 92.3, topUp: true })'))
+        === '{"gold":1800,"tokens":6,"fromBalance":13,"ownEuros":1.3,"odd":1.3}', JSON.stringify(app('goalCost({ euros: 92.3, topUp: true })')));
+    check('a topped-up goal under a token is all out of pocket', JSON.stringify(app('goalCost({ euros: 20, topUp: true })'))
+        === '{"gold":0,"tokens":0,"fromBalance":13,"ownEuros":7,"odd":7}', JSON.stringify(app('goalCost({ euros: 20, topUp: true })')));
     check('a later goal only gets the balance the current one leaves', progress(600) === '[[[100,0],null],[[100,0],[50,300]]]', progress(600));
     app('state.tokenPrice = null');
     check('a goal the balance covers costs nothing, even without a token price', JSON.stringify(app('goalCost({ euros: 13 })'))
-        === '{"gold":0,"tokens":0,"fromBalance":13}', JSON.stringify(app('goalCost({ euros: 13 })')));
+        === '{"gold":0,"tokens":0,"fromBalance":13,"ownEuros":0,"odd":0}', JSON.stringify(app('goalCost({ euros: 13 })')));
     check('euros read with or without the €', JSON.stringify([app('parseEuros("13")'), app('parseEuros(" 14,99 € ")'), app('parseEuros("")')]) === '[13,14.99,null]'
         && Number.isNaN(app('parseEuros("x")')));
 
