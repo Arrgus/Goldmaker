@@ -534,7 +534,7 @@ function tickColumnButton(act, chars) {
     if (!able.length) return '';
     const all = able.every(c => isDone(viewedWeek, c.id, act.id));
     return all
-        ? `<button class="tick-column" data-tick-column="${act.id}" title="Untick ${esc(act.name)} for every character">○ all</button>`
+        ? `<button class="tick-column untick" data-tick-column="${act.id}" title="Untick ${esc(act.name)} for every character">○ all</button>`
         : `<button class="tick-column" data-tick-column="${act.id}" title="Tick ${esc(act.name)} for every character who hasn't done it, with the same gold for each (0 for a weekly they can't do)">✔ all</button>`;
 }
 
